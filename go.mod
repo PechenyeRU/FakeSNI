@@ -1,6 +1,6 @@
 module fakesni
 
-go 1.25.0
+go 1.25
 
 require (
 	github.com/florianl/go-nfqueue v1.3.2
