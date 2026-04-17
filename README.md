@@ -1,7 +1,7 @@
 # FakeSNI
 
 A fast, clean Go port of [patterniha/SNI-Spoofing](https://github.com/patterniha/SNI-Spoofing)
-for **Linux**. It runs a TCP proxy that, for each outbound connection, injects
+with full packet-injection support on **Linux**. It runs a TCP proxy that, for each outbound connection, injects
 a fake TLS `ClientHello` carrying a decoy SNI right after the TCP handshake.
 The fake segment is crafted with a deliberately out-of-window sequence number,
 so the remote server discards the payload while any on-path DPI still ingests
@@ -37,6 +37,11 @@ userspace timing (~1 ms delay between the real ACK and the fake segment) and
 one-off packet crafting, which is awkward inside a TC/XDP program. NFQUEUE
 gives the same pydivert-style model with mature Go bindings.
 
+## Platform support
+
+- Linux: full bypass mode (`NFQUEUE` + raw socket injection + optional iptables/conntrack setup).
+- macOS and other non-Linux systems: plain TCP proxy mode only. The proxy still accepts and forwards traffic, but the fake-SNI bypass is disabled because the Linux packet path is unavailable.
+
 ## Requirements
 
 - Linux with `iptables` and `nf_conntrack_netlink` (standard on any modern distro).
@@ -54,6 +59,8 @@ Dependencies (all fetched via `go mod`):
 ```sh
 go build -o fakesni .
 ```
+
+On macOS, the binary builds and runs without root, but it works as a normal TCP proxy and logs a warning that packet bypass is disabled.
 
 ## Configuration
 

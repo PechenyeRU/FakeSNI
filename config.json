@@ -1,9 +1,9 @@
 {
   "LISTEN_HOST": "0.0.0.0",
   "LISTEN_PORT": 40443,
-  "CONNECT_IP": "188.114.98.0",
+  "CONNECT_IP": "104.19.229.21",
   "CONNECT_PORT": 443,
-  "FAKE_SNI": "auth.vercel.com",
-  "QUEUE_NUM": 100,
+  "FAKE_SNI": "hcaptcha.com",
+  "QUEUE_NUM": 1000,
   "HANDSHAKE_TIMEOUT_MS": 2000
 }

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 )
 
@@ -40,34 +41,38 @@ func main() {
 	}
 	log.Printf("interface ip: %s", cfg.InterfaceIP)
 
-	if os.Geteuid() != 0 {
-		log.Fatal("must run as root (NFQUEUE + raw sockets + /proc/sys writes)")
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	if !cfg.NoConntrackTweak {
-		if restore, err := setConntrackLiberal(); err != nil {
-			log.Printf("warning: could not tweak conntrack: %v", err)
-		} else {
-			defer restore()
-		}
-	}
-
-	if !cfg.NoIptablesSetup {
-		cleanup, err := setupIptables(cfg)
-		if err != nil {
-			log.Fatalf("iptables: %v", err)
-		}
-		defer cleanup()
-	}
 
 	inj, err := NewInjector(cfg)
 	if err != nil {
 		log.Fatalf("injector: %v", err)
 	}
 	defer inj.Close()
+
+	if inj.Enabled() {
+		if os.Geteuid() != 0 {
+			log.Fatal("must run as root (NFQUEUE + raw sockets + /proc/sys writes)")
+		}
+
+		if !cfg.NoConntrackTweak {
+			if restore, err := setConntrackLiberal(); err != nil {
+				log.Printf("warning: could not tweak conntrack: %v", err)
+			} else {
+				defer restore()
+			}
+		}
+
+		if !cfg.NoIptablesSetup {
+			cleanup, err := setupIptables(cfg)
+			if err != nil {
+				log.Fatalf("iptables: %v", err)
+			}
+			defer cleanup()
+		}
+	} else {
+		log.Printf("warning: packet bypass is disabled on %s; running as a plain TCP proxy", runtime.GOOS)
+	}
 
 	go func() {
 		if err := inj.Run(ctx); err != nil {
