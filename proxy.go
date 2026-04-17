@@ -71,6 +71,9 @@ func (p *Proxy) handle(ctx context.Context, in *net.TCPConn) {
 	dialer := net.Dialer{
 		LocalAddr: &net.TCPAddr{IP: ifaceIP},
 		Control: func(network, address string, rc syscall.RawConn) error {
+			if !p.inj.Enabled() {
+				return nil
+			}
 			return rc.Control(func(fd uintptr) {
 				sa, err := syscall.Getsockname(int(fd))
 				if err != nil {
@@ -107,23 +110,25 @@ func (p *Proxy) handle(ctx context.Context, in *net.TCPConn) {
 	}
 	defer out.Close()
 
-	// Wait for the injector to confirm the fake ClientHello was absorbed.
-	timeout := time.Duration(p.cfg.HandshakeTimeoutMs) * time.Millisecond
-	select {
-	case <-cs.done:
-		if cs.doneErr != nil {
-			log.Printf("bypass failed: %v", cs.doneErr)
+	if p.inj.Enabled() {
+		// Wait for the injector to confirm the fake ClientHello was absorbed.
+		timeout := time.Duration(p.cfg.HandshakeTimeoutMs) * time.Millisecond
+		select {
+		case <-cs.done:
+			if cs.doneErr != nil {
+				log.Printf("bypass failed: %v", cs.doneErr)
+				p.inj.remove(cs)
+				return
+			}
+		case <-time.After(timeout):
+			cs.finish(ErrBypassTimeout)
 			p.inj.remove(cs)
+			log.Printf("bypass timeout for %s:%d", p.cfg.ConnectIP, p.cfg.ConnectPort)
 			return
 		}
-	case <-time.After(timeout):
-		cs.finish(ErrBypassTimeout)
+		// Remove from the tracking map so further packets take the fast path.
 		p.inj.remove(cs)
-		log.Printf("bypass timeout for %s:%d", p.cfg.ConnectIP, p.cfg.ConnectPort)
-		return
 	}
-	// Remove from the tracking map so further packets take the fast path.
-	p.inj.remove(cs)
 
 	// Bidirectional relay until either side EOFs or errors.
 	done := make(chan struct{}, 2)
