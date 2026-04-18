@@ -124,6 +124,35 @@ By default, at startup it will:
 Set `NO_IPTABLES_SETUP` / `NO_CONNTRACK_TWEAK` to `true` in the config if you
 prefer to manage these yourself.
 
+## Docker
+
+You can also run FakeSNI using Docker Compose for easier deployment and management.
+
+### Prerequisites
+- Docker Engine 20.10+
+- Docker Compose V2+
+- Linux host system
+
+### Quick Start
+```sh
+docker compose up -d --build
+
+# View logs
+docker compose logs -f
+
+# Stop the service
+docker compose down
+```
+
+### Configuration
+Edit `config.json` before running, or change line 16 in `docker-compose.yml` to mount a different config file:
+```yaml
+    volumes:
+      - ./config.json:/app/config.json:ro
+```
+
+**Note**: The container runs with required privileges (`NET_ADMIN`, `NET_RAW`, `SYS_ADMIN`) and host networking for iptables integration. See [DOCKER.md](DOCKER.md) for detailed configuration and troubleshooting.
+
 ## Project layout
 
 ```
