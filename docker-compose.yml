@@ -1,0 +1,37 @@
+services:
+  fakesni:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fakesni
+    # Required capabilities for iptables, NFQUEUE, and raw sockets
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    network_mode: host
+    volumes:
+      - ./config.json:/app/config.json:ro
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
+    # deploy is optional
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+          cpus: '0.25'
+    healthcheck:
+      test: ["CMD", "netstat", "-ln", "||", "grep", ":40443"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
