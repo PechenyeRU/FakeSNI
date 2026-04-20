@@ -2,25 +2,29 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
-// Proxy is a plain TCP forwarder: it accepts clients on LISTEN_HOST:LISTEN_PORT
-// and opens a matching outbound connection to CONNECT_IP:CONNECT_PORT. For
-// every outbound connection it coordinates with the Injector to run the
-// SNI-spoofing bypass before any real bytes are relayed.
+// Proxy is a plain TCP forwarder. For each outbound connection it coordinates
+// with the Injector to run the configured bypass before relaying real bytes.
 type Proxy struct {
-	cfg *Config
-	inj *Injector
+	cfg      *Config
+	inj      *Injector
+	pool     *SNIPool
+	mode     BypassMode
+	stats    *Stats
+	nextID   atomic.Uint64
 }
 
-func NewProxy(cfg *Config, inj *Injector) *Proxy {
-	return &Proxy{cfg: cfg, inj: inj}
+func NewProxy(cfg *Config, inj *Injector, pool *SNIPool, mode BypassMode, st *Stats) *Proxy {
+	return &Proxy{cfg: cfg, inj: inj, pool: pool, mode: mode, stats: st}
 }
 
 func (p *Proxy) Run(ctx context.Context) error {
@@ -30,8 +34,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 		return err
 	}
 	defer ln.Close()
-	log.Printf("listening on %s -> %s:%d (fake SNI: %s)",
-		ln.Addr(), p.cfg.ConnectIP, p.cfg.ConnectPort, p.cfg.FakeSNI)
+	log.Printf("listening on %s -> %s:%d", ln.Addr(), p.cfg.ConnectIP, p.cfg.ConnectPort)
 
 	go func() {
 		<-ctx.Done()
@@ -53,20 +56,23 @@ func (p *Proxy) Run(ctx context.Context) error {
 }
 
 func (p *Proxy) handle(ctx context.Context, in *net.TCPConn) {
+	connID := p.nextID.Add(1)
+	p.stats.Active.Add(1)
+	defer p.stats.Active.Add(-1)
 	defer in.Close()
+	defer p.pool.Release(connID)
 
 	ifaceIP := net.ParseIP(p.cfg.InterfaceIP).To4()
 	connectIP := net.ParseIP(p.cfg.ConnectIP).To4()
 	if ifaceIP == nil || connectIP == nil {
 		log.Printf("invalid ipv4 in config")
+		p.stats.Failed.Add(1)
 		return
 	}
 
-	fakeData := BuildClientHello(p.cfg.FakeSNI)
+	sni := p.pool.Next(connID)
+	fakeData := BuildClientHello(sni)
 
-	// The Control callback below runs after bind() and before connect(), so
-	// we can learn the ephemeral source port and register the connection
-	// with the injector before the kernel emits the SYN.
 	var cs *connState
 	dialer := net.Dialer{
 		LocalAddr: &net.TCPAddr{IP: ifaceIP},
@@ -85,6 +91,8 @@ func (p *Proxy) handle(ctx context.Context, in *net.TCPConn) {
 					fakePayload: fakeData,
 					srcPort:     uint16(sa4.Port),
 					dstPort:     uint16(p.cfg.ConnectPort),
+					mode:        p.mode,
+					lowTTL:      uint8(p.cfg.LowTTLValue),
 				}
 				copy(cs.srcIP[:], ifaceIP)
 				copy(cs.dstIP[:], connectIP)
@@ -103,31 +111,125 @@ func (p *Proxy) handle(ctx context.Context, in *net.TCPConn) {
 			p.inj.remove(cs)
 		}
 		log.Printf("dial %s: %v", target, err)
+		p.stats.Failed.Add(1)
 		return
 	}
 	defer out.Close()
 
-	// Wait for the injector to confirm the fake ClientHello was absorbed.
 	timeout := time.Duration(p.cfg.HandshakeTimeoutMs) * time.Millisecond
 	select {
 	case <-cs.done:
 		if cs.doneErr != nil {
 			log.Printf("bypass failed: %v", cs.doneErr)
 			p.inj.remove(cs)
+			p.stats.BypassFailed.Add(1)
+			p.stats.Failed.Add(1)
 			return
 		}
 	case <-time.After(timeout):
 		cs.finish(ErrBypassTimeout)
 		p.inj.remove(cs)
 		log.Printf("bypass timeout for %s:%d", p.cfg.ConnectIP, p.cfg.ConnectPort)
+		p.stats.BypassFailed.Add(1)
+		p.stats.Failed.Add(1)
 		return
 	}
-	// Remove from the tracking map so further packets take the fast path.
 	p.inj.remove(cs)
 
-	// Bidirectional relay until either side EOFs or errors.
+	if tcpOut, ok := out.(*net.TCPConn); ok {
+		_ = tcpOut.SetNoDelay(true)
+	}
+
+	p.stats.Succeeded.Add(1)
+
+	clientToServer := func() error {
+		if p.cfg.FragmentEnable {
+			if err := p.fragmentFirstRecord(in, out); err != nil {
+				return err
+			}
+		}
+		n, err := io.Copy(out, in)
+		p.stats.BytesOut.Add(n)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		return nil
+	}
+
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(out, in); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(in, out); done <- struct{}{} }()
+	go func() {
+		_ = clientToServer()
+		if tcpOut, ok := out.(*net.TCPConn); ok {
+			_ = tcpOut.CloseWrite()
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		n, _ := io.Copy(in, out)
+		p.stats.BytesIn.Add(n)
+		_ = in.CloseWrite()
+		done <- struct{}{}
+	}()
 	<-done
+}
+
+// fragmentFirstRecord reads the first TLS record from in and forwards it to
+// out in several small segments. Subsequent data flows via plain io.Copy.
+func (p *Proxy) fragmentFirstRecord(in net.Conn, out net.Conn) error {
+	hdr := make([]byte, 5)
+	if _, err := io.ReadFull(in, hdr); err != nil {
+		return err
+	}
+	if hdr[0] != 0x16 {
+		if _, err := out.Write(hdr); err != nil {
+			return err
+		}
+		return nil
+	}
+	recLen := int(hdr[3])<<8 | int(hdr[4])
+	body := make([]byte, recLen)
+	if _, err := io.ReadFull(in, body); err != nil {
+		return err
+	}
+	full := append(hdr, body...)
+
+	lo := p.cfg.FragmentSizeMin
+	hi := p.cfg.FragmentSizeMax
+	if lo < 1 {
+		lo = 1
+	}
+	if hi < lo {
+		hi = lo
+	}
+
+	first := lo + randIntn(hi-lo+1)
+	if first >= len(full) {
+		first = len(full) / 2
+		if first < 1 {
+			first = 1
+		}
+	}
+
+	chunks := [][]byte{full[:first]}
+	rest := full[first:]
+	for len(rest) > 0 {
+		// Remaining segments use random sizes between 8 and 64, enough to look
+		// like natural MTU-bounded fragments without being tiny.
+		size := 8 + randIntn(57)
+		if size > len(rest) {
+			size = len(rest)
+		}
+		chunks = append(chunks, rest[:size])
+		rest = rest[size:]
+	}
+
+	for i, ch := range chunks {
+		if _, err := out.Write(ch); err != nil {
+			return err
+		}
+		if i+1 < len(chunks) {
+			time.Sleep(time.Duration(5+randIntn(15)) * time.Millisecond)
+		}
+	}
+	return nil
 }
