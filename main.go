@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 )
 
@@ -31,6 +34,16 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
+	if cfg.LogFile != "" {
+		if err := os.MkdirAll(filepath.Dir(cfg.LogFile), 0o755); err == nil {
+			f, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err == nil {
+				log.SetOutput(io.MultiWriter(os.Stderr, f))
+			}
+		}
+	}
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
 	if cfg.InterfaceIP == "" {
 		ip, err := detectOutboundIP(cfg.ConnectIP)
 		if err != nil {
@@ -39,6 +52,18 @@ func main() {
 		cfg.InterfaceIP = ip
 	}
 	log.Printf("interface ip: %s", cfg.InterfaceIP)
+
+	mode, err := parseBypassMode(cfg.BypassStrategy)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	sniStrat, err := parseSNIStrategy(cfg.SNIStrategy)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	pool := NewSNIPool(cfg.SNIPool, sniStrat)
+	log.Printf("bypass=%s sni_strategy=%s sni_pool=%d entries",
+		cfg.BypassStrategy, cfg.SNIStrategy, len(cfg.SNIPool))
 
 	if os.Geteuid() != 0 {
 		log.Fatal("must run as root (NFQUEUE + raw sockets + /proc/sys writes)")
@@ -69,6 +94,13 @@ func main() {
 	}
 	defer inj.Close()
 
+	stats := NewStats()
+	go func() {
+		if err := stats.Serve(ctx, cfg.StatsAddr); err != nil && err != http.ErrServerClosed {
+			log.Printf("stats: %v", err)
+		}
+	}()
+
 	go func() {
 		if err := inj.Run(ctx); err != nil {
 			log.Printf("injector stopped: %v", err)
@@ -76,7 +108,7 @@ func main() {
 		}
 	}()
 
-	prx := NewProxy(cfg, inj)
+	prx := NewProxy(cfg, inj, pool, mode, stats)
 	go func() {
 		if err := prx.Run(ctx); err != nil {
 			log.Printf("proxy stopped: %v", err)
@@ -94,8 +126,6 @@ func main() {
 	cancel()
 }
 
-// detectOutboundIP asks the kernel which local address would be used to
-// reach the given remote, without actually sending anything.
 func detectOutboundIP(remote string) (string, error) {
 	c, err := net.Dial("udp", net.JoinHostPort(remote, "1"))
 	if err != nil {
