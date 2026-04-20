@@ -1,0 +1,16 @@
+[Unit]
+Description=FakeSNI TCP proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/fakesni/fakesni -config /etc/fakesni/config.json
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+User=root
+WorkingDirectory=/opt/fakesni
+
+[Install]
+WantedBy=multi-user.target
