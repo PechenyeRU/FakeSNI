@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# FakeSNI installer & manager — English UI, colorized
-# Reworked from: https://github.com/skyboy610/FakeSNI
+# FakeSNI installer & manager — English UI, rainbow-colored
+# Source: https://github.com/skyboy610/FakeSNI
 #
-# Conventions:
-#   * Messages (ok / err / warn / info) use a colored BACKGROUND with white text,
-#     sized to the message text.
-#   * Green / Red / Yellow are reserved for these messages only.
-#   * Every menu entry has its own unique foreground color (blue / cyan / purple /
-#     pink spectrum — never green / red / yellow).
-#   * Menu description lines alternate between turquoise and purple.
+# Color rules:
+#   * Green / Red / Yellow backgrounds (white text on top) are reserved
+#     EXCLUSIVELY for status messages: ok / warn / err.
+#   * Every other colored surface (menu entries, banners, config panels)
+#     uses a rainbow palette that avoids green / red / yellow entirely.
+#   * Menu entries follow a rainbow gradient, each line in a different hue;
+#     the number [N] and the text are colored the SAME on each line.
 #
 set -u
 
@@ -39,47 +39,44 @@ if [[ -t 1 ]]; then
 
     FG_WHITE=$'\033[97m'
     FG_GRAY=$'\033[38;5;245m'
+    FG_BOLD_WHITE=$'\033[1;97m'
 
-    # alternating brand colors
-    TURQ=$'\033[38;5;45m'      # فیروزه‌ای
-    PURPLE=$'\033[38;5;141m'   # بنفش
+    # rainbow menu palette — no green / yellow / red hues
+    C1=$'\033[38;5;208m'   # orange
+    C2=$'\033[38;5;203m'   # coral (orange-pink)
+    C3=$'\033[38;5;213m'   # pink
+    C4=$'\033[38;5;141m'   # purple
+    C5=$'\033[38;5;69m'    # medium blue
+    C6=$'\033[38;5;51m'    # turquoise / cyan
+    C7=$'\033[38;5;87m'    # aqua
+    C8=$'\033[38;5;75m'    # sky blue
+    C9=$'\033[38;5;99m'    # violet
+    C10=$'\033[38;5;177m'  # orchid
+    C11=$'\033[38;5;215m'  # light orange
+    C12=$'\033[38;5;111m'  # light blue
+    C13=$'\033[38;5;183m'  # lavender
+    C14=$'\033[38;5;201m'  # magenta
 
-    # per-option unique bracket colors — none of them green/red/yellow
-    # also intentionally distinct from TURQ(45) and PURPLE(141) so brackets
-    # never blend into the alternating line color.
-    M1=$'\033[38;5;81m'        # light cyan
-    M2=$'\033[38;5;51m'        # cyan
-    M3=$'\033[38;5;87m'        # aqua
-    M4=$'\033[38;5;39m'        # deep sky blue
-    M5=$'\033[38;5;75m'        # sky blue
-    M6=$'\033[38;5;63m'        # blue-violet
-    M7=$'\033[38;5;99m'        # purple
-    M8=$'\033[38;5;135m'       # medium orchid
-    M9=$'\033[38;5;177m'       # orchid
-    M10=$'\033[38;5;201m'      # magenta
-    M11=$'\033[38;5;213m'      # pink
-    M12=$'\033[38;5;207m'      # hot magenta
-    M13=$'\033[38;5;219m'      # light pink
-    M14=$'\033[38;5;33m'       # blue
-
-    # message backgrounds (white text on top)
+    # message backgrounds (reserved)
     BG_GREEN=$'\033[48;5;28m'
     BG_RED=$'\033[48;5;124m'
     BG_YELLOW=$'\033[48;5;136m'
     BG_BLUE=$'\033[48;5;25m'
+
+    # config panel backgrounds (distinct from each other)
+    BG_CFG_GEN=$'\033[48;5;54m'     # dark purple — for generated client config
+    BG_CFG_FILE=$'\033[48;5;23m'    # dark teal   — for viewing config.json
 else
     RST=''; BOLD=''; DIM=''
-    FG_WHITE=''; FG_GRAY=''
-    TURQ=''; PURPLE=''
-    M1=''; M2=''; M3=''; M4=''; M5=''; M6=''; M7=''
-    M8=''; M9=''; M10=''; M11=''; M12=''; M13=''; M14=''
+    FG_WHITE=''; FG_GRAY=''; FG_BOLD_WHITE=''
+    C1=''; C2=''; C3=''; C4=''; C5=''; C6=''; C7=''
+    C8=''; C9=''; C10=''; C11=''; C12=''; C13=''; C14=''
     BG_GREEN=''; BG_RED=''; BG_YELLOW=''; BG_BLUE=''
+    BG_CFG_GEN=''; BG_CFG_FILE=''
 fi
 
 # =========================================================
 #  logging primitives
-#  * screen: background-colored block with white text
-#  * file:   plain "[ts] [TAG] msg" line for grep-ability
 # =========================================================
 _ts() { date '+%F %T'; }
 
@@ -89,13 +86,18 @@ _writef() {
     printf '[%s] [%s] %s\n' "$(_ts)" "$tag" "$*" >>"${MGR_LOG}" 2>/dev/null || true
 }
 
-ok()   { printf '%s\n' "${BG_GREEN}${FG_WHITE}${BOLD}  ✓  $*  ${RST}";    _writef OK   "$*"; }
-err()  { printf '%s\n' "${BG_RED}${FG_WHITE}${BOLD}  ✗  $*  ${RST}" >&2;  _writef ERR  "$*"; }
-warn() { printf '%s\n' "${BG_YELLOW}${FG_WHITE}${BOLD}  !  $*  ${RST}";   _writef WARN "$*"; }
-info() { printf '%s\n' "${BG_BLUE}${FG_WHITE}${BOLD}  i  $*  ${RST}";     _writef INFO "$*"; }
+ok()   { printf '%s\n' "${BG_GREEN}${FG_BOLD_WHITE}  ✓  $*  ${RST}";    _writef OK   "$*"; }
+err()  { printf '%s\n' "${BG_RED}${FG_BOLD_WHITE}  ✗  $*  ${RST}" >&2;  _writef ERR  "$*"; }
+warn() { printf '%s\n' "${BG_YELLOW}${FG_BOLD_WHITE}  !  $*  ${RST}";   _writef WARN "$*"; }
+info() { printf '%s\n' "${BG_BLUE}${FG_BOLD_WHITE}  i  $*  ${RST}";     _writef INFO "$*"; }
 
-hr_turq()   { printf '%s\n' "${TURQ}──────────────────────────────────────────────────${RST}"; }
-hr_purple() { printf '%s\n' "${PURPLE}──────────────────────────────────────────────────${RST}"; }
+# print multi-line text with a background color on every visible line
+print_bg_block() {
+    local bg="$1"; local text="$2"
+    while IFS= read -r line; do
+        printf '%s%s  %s  %s\n' "$bg" "$FG_BOLD_WHITE" "$line" "$RST"
+    done <<<"$text"
+}
 
 need_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -110,7 +112,7 @@ pause() {
 }
 
 # =========================================================
-#  detectors / helpers
+#  helpers
 # =========================================================
 is_installed() {
     [[ -x "${BIN_FILE}" && -f "${CONF_FILE}" && -f "${SERVICE_FILE}" ]]
@@ -133,20 +135,42 @@ detect_os() {
 public_ip() {
     local ip=""
     ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
-    [[ -z "$ip" ]] && ip=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null || true)
-    printf '%s' "${ip:-unknown}"
+    [[ -z "$ip" ]] && ip=$(curl -s --max-time 5 https://ifconfig.me  2>/dev/null || true)
+    [[ -z "$ip" ]] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    printf '%s' "${ip:-0.0.0.0}"
 }
 
 valid_ipv4() {
     [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-    local IFS=.; local -a o=($1)
-    local n
+    local IFS=.; local -a o=($1); local n
     for n in "${o[@]}"; do (( n <= 255 )) || return 1; done
     return 0
 }
 
 valid_port() {
     [[ $1 =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+}
+
+gen_uuid() {
+    if [[ -r /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid
+    elif command -v uuidgen >/dev/null 2>&1; then
+        uuidgen
+    else
+        python3 -c 'import uuid; print(uuid.uuid4())'
+    fi
+}
+
+gen_password() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 16
+    else
+        head -c 24 /dev/urandom | base64 | tr -d '=+/\n' | head -c 24
+    fi
+}
+
+url_encode() {
+    python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
 }
 
 json_get() {
@@ -182,6 +206,21 @@ with open(file, "w") as f:
 PY
 }
 
+pick_sni() {
+    python3 - "${CONF_FILE}" <<'PY'
+import json, sys, random
+try:
+    d = json.load(open(sys.argv[1]))
+    pool = d.get("SNI_POOL", [])
+    if pool:
+        print(random.choice(pool))
+    else:
+        print("www.digikala.com")
+except Exception:
+    print("www.digikala.com")
+PY
+}
+
 # =========================================================
 #  install stages
 # =========================================================
@@ -191,10 +230,10 @@ install_deps() {
     case "$os" in
         ubuntu|debian)
             apt-get update -y
-            apt-get install -y curl iptables libnetfilter-queue1 qrencode python3 git tar
+            apt-get install -y curl iptables libnetfilter-queue1 qrencode python3 git tar openssl uuid-runtime
             ;;
         centos|rhel|almalinux|rocky|fedora)
-            yum install -y curl iptables libnetfilter_queue qrencode python3 git tar
+            yum install -y curl iptables libnetfilter_queue qrencode python3 git tar openssl util-linux
             ;;
         *)
             warn "Unknown distribution: ${os}. Assuming dependencies are already present."
@@ -235,7 +274,8 @@ build_binary() {
     rm -rf "$src"
     git clone --depth 1 --branch "${REPO_BRANCH}" "${REPO_URL}" "$src" || { err "git clone failed"; return 1; }
     local gobin="/usr/local/go/bin/go"
-    [[ -x "$gobin" ]] || gobin="$(command -v go)"
+    [[ -x "$gobin" ]] || gobin="$(command -v go || true)"
+    [[ -n "$gobin" ]] || { err "Go toolchain not found"; return 1; }
     ( cd "$src" && "$gobin" build -o "${BIN_FILE}" . ) || { err "Go build failed"; return 1; }
     chmod +x "${BIN_FILE}"
     ok "Binary built: ${BIN_FILE}"
@@ -309,11 +349,11 @@ do_install() {
     build_binary || return 1
     write_default_config
     write_service
-    info "Next: set upstream IP in menu [2], then start the service from [8]."
+    info "Next: set the upstream IP (menu 2), then start the service via Manager → Start."
 }
 
 # =========================================================
-#  menu actions
+#  main-menu actions
 # =========================================================
 set_upstream() {
     need_root
@@ -324,7 +364,7 @@ set_upstream() {
     read -r -p "Foreign server port [443]: " port
     port=${port:-443}
     valid_port "$port" || { err "Invalid port"; return 1; }
-    json_set CONNECT_IP "$ip" "${CONF_FILE}" || { err "Failed to save CONNECT_IP"; return 1; }
+    json_set CONNECT_IP "$ip" "${CONF_FILE}"     || { err "Failed to save CONNECT_IP";   return 1; }
     json_set CONNECT_PORT "$port" "${CONF_FILE}" int || { err "Failed to save CONNECT_PORT"; return 1; }
     ok "Upstream set to ${ip}:${port}"
     if systemctl is-active --quiet "${APP_NAME}"; then
@@ -337,7 +377,7 @@ manage_sni() {
     [[ -f "${CONF_FILE}" ]] || { err "Install first."; return 1; }
     while true; do
         echo
-        printf '%s\n' "${TURQ}──── SNI Pool Management ────${RST}"
+        printf '%s\n' "${C1}──── SNI Pool Management ────${RST}"
         python3 - "${CONF_FILE}" <<'PY'
 import json, sys
 try:
@@ -351,10 +391,10 @@ except Exception as e:
     print(f"  (could not read pool: {e})")
 PY
         echo
-        printf '%s\n' "  ${M1}[a]${RST}  ${TURQ}Add SNI${RST}"
-        printf '%s\n' "  ${M4}[d]${RST}  ${PURPLE}Delete SNI${RST}"
-        printf '%s\n' "  ${M8}[r]${RST}  ${TURQ}Reset pool to default${RST}"
-        printf '%s\n' "  ${FG_GRAY}[q]${RST}  ${PURPLE}Back${RST}"
+        printf '%s\n' "  ${C1}[a]${RST}  ${C1}Add SNI${RST}"
+        printf '%s\n' "  ${C3}[d]${RST}  ${C3}Delete SNI${RST}"
+        printf '%s\n' "  ${C5}[r]${RST}  ${C5}Reset pool to default${RST}"
+        printf '%s\n' "  ${FG_GRAY}[q]${RST}  ${FG_GRAY}Back${RST}"
         read -r -p "Choice: " c
         case "$c" in
             a|A)
@@ -410,9 +450,9 @@ change_strategy() {
     local cur
     cur=$(json_get BYPASS_STRATEGY "${CONF_FILE}")
     echo "Current strategy: ${BOLD}${cur:-unknown}${RST}"
-    printf '%s\n' "  ${M2}[1]${RST}  ${TURQ}wrong_seq${RST}"
-    printf '%s\n' "  ${M5}[2]${RST}  ${PURPLE}low_ttl${RST}"
-    printf '%s\n' "  ${M9}[3]${RST}  ${TURQ}hybrid${RST}"
+    printf '%s\n' "  ${C1}[1]${RST}  ${C1}wrong_seq${RST}"
+    printf '%s\n' "  ${C3}[2]${RST}  ${C3}low_ttl${RST}"
+    printf '%s\n' "  ${C5}[3]${RST}  ${C5}hybrid${RST}"
     read -r -p "Choice: " c
     case "$c" in
         1) json_set BYPASS_STRATEGY wrong_seq "${CONF_FILE}" ;;
@@ -426,6 +466,188 @@ change_strategy() {
     fi
 }
 
+# ──────────── client config generation (fully automatic) ────────────
+gen_client_config() {
+    [[ -f "${CONF_FILE}" ]] || { err "Install first."; return 1; }
+
+    local server_ip server_port
+    server_ip=$(public_ip)
+    server_port=$(json_get LISTEN_PORT "${CONF_FILE}")
+    [[ -z "$server_port" ]] && server_port="40443"
+
+    if [[ "$server_ip" == "0.0.0.0" ]]; then
+        warn "Public IP could not be determined — link may need to be edited by hand."
+    fi
+
+    echo
+    printf '%s\n' "${C4}──── Generate Client Config (all fields auto) ────${RST}"
+    printf '%s\n' "  ${C1}[1]${RST} ${C1}VLESS + TLS (recommended)${RST}"
+    printf '%s\n' "  ${C3}[2]${RST} ${C3}Trojan${RST}"
+    printf '%s\n' "  ${C5}[3]${RST} ${C5}Shadowsocks${RST}"
+    read -r -p "Protocol [1]: " proto
+    proto=${proto:-1}
+
+    local sni remark short_ts id meth link outbound_json upstream_note
+    sni=$(pick_sni)
+    short_ts=$(date +%s | tail -c 5)
+    remark="${APP_NAME}-${short_ts}"
+    local remark_enc; remark_enc=$(url_encode "$remark")
+
+    case "$proto" in
+        1)
+            id=$(gen_uuid)
+            link="vless://${id}@${server_ip}:${server_port}?encryption=none&security=tls&sni=${sni}&fp=chrome&type=tcp&headerType=none&allowInsecure=0#${remark_enc}"
+            outbound_json=$(cat <<EOF
+{
+  "tag": "${APP_NAME}-outbound",
+  "protocol": "vless",
+  "settings": {
+    "vnext": [{
+      "address": "${server_ip}",
+      "port": ${server_port},
+      "users": [{"id": "${id}", "encryption": "none", "flow": ""}]
+    }]
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "tls",
+    "tlsSettings": {
+      "serverName": "${sni}",
+      "fingerprint": "chrome",
+      "allowInsecure": false
+    }
+  }
+}
+EOF
+)
+            upstream_note="On your upstream Xray / 3x-ui, create an inbound with the SAME UUID: ${id}"
+            ;;
+        2)
+            id=$(gen_password)
+            link="trojan://${id}@${server_ip}:${server_port}?sni=${sni}&fp=chrome&type=tcp&security=tls&allowInsecure=0#${remark_enc}"
+            outbound_json=$(cat <<EOF
+{
+  "tag": "${APP_NAME}-outbound",
+  "protocol": "trojan",
+  "settings": {
+    "servers": [{"address": "${server_ip}", "port": ${server_port}, "password": "${id}"}]
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "tls",
+    "tlsSettings": {
+      "serverName": "${sni}",
+      "fingerprint": "chrome",
+      "allowInsecure": false
+    }
+  }
+}
+EOF
+)
+            upstream_note="On your upstream Xray / 3x-ui, create a Trojan inbound with this password: ${id}"
+            ;;
+        3)
+            meth="chacha20-ietf-poly1305"
+            id=$(gen_password)
+            local b64; b64=$(printf "%s:%s" "$meth" "$id" | base64 -w0)
+            link="ss://${b64}@${server_ip}:${server_port}#${remark_enc}"
+            outbound_json=$(cat <<EOF
+{
+  "tag": "${APP_NAME}-outbound",
+  "protocol": "shadowsocks",
+  "settings": {
+    "servers": [{
+      "address": "${server_ip}",
+      "port": ${server_port},
+      "method": "${meth}",
+      "password": "${id}"
+    }]
+  }
+}
+EOF
+)
+            upstream_note="On your upstream Xray / 3x-ui, create a Shadowsocks inbound with method=${meth} and password=${id}"
+            ;;
+        *) err "Invalid choice"; return 1 ;;
+    esac
+
+    echo
+    printf '%s\n' "${C6}═════════════ Summary ═════════════${RST}"
+    printf '  %sServer IP   :%s %s\n' "$C2" "$RST" "$server_ip"
+    printf '  %sListen port :%s %s\n' "$C3" "$RST" "$server_port"
+    printf '  %sSNI (random):%s %s\n' "$C4" "$RST" "$sni"
+    printf '  %sRemark      :%s %s\n' "$C5" "$RST" "$remark"
+    [[ -n "${id:-}" ]] && printf '  %sCredential  :%s %s\n' "$C6" "$RST" "$id"
+    echo
+
+    # — shareable link — colored background (generator panel)
+    printf '%s\n' "${C4}─── Shareable link (import in v2rayNG / NekoBox / Hiddify) ───${RST}"
+    print_bg_block "$BG_CFG_GEN" "$link"
+    echo
+
+    # — QR code —
+    if command -v qrencode >/dev/null 2>&1; then
+        printf '%s\n' "${C4}─── QR Code ───${RST}"
+        qrencode -t ANSIUTF8 "$link"
+    else
+        warn "qrencode is not installed; install it via option 1 to get QR codes."
+    fi
+    echo
+
+    # — JSON outbound — colored background (generator panel)
+    printf '%s\n' "${C4}─── JSON outbound (for 3x-ui / Xray) ───${RST}"
+    print_bg_block "$BG_CFG_GEN" "$outbound_json"
+    echo
+
+    info "$upstream_note"
+
+    if command -v xclip >/dev/null 2>&1; then
+        echo "$link" | xclip -selection clipboard 2>/dev/null && ok "Link copied to clipboard."
+    elif command -v pbcopy >/dev/null 2>&1; then
+        echo "$link" | pbcopy && ok "Link copied to clipboard."
+    fi
+}
+
+show_config_file() {
+    [[ -f "${CONF_FILE}" ]] || { err "Config file not found: ${CONF_FILE}"; return 1; }
+    echo
+    printf '%s\n' "${C2}─── Current configuration: ${CONF_FILE} ───${RST}"
+    echo
+    local content
+    content=$(python3 -m json.tool "${CONF_FILE}" 2>/dev/null) || content=$(cat "${CONF_FILE}")
+    print_bg_block "$BG_CFG_FILE" "$content"
+    echo
+    local status ip_upstream po_upstream
+    status=$(service_status)
+    ip_upstream=$(json_get CONNECT_IP   "${CONF_FILE}")
+    po_upstream=$(json_get CONNECT_PORT "${CONF_FILE}")
+    info "Service: ${status}  |  Upstream: ${ip_upstream:-<unset>}:${po_upstream:-?}"
+}
+
+# =========================================================
+#  manager-submenu actions
+# =========================================================
+start_svc() {
+    need_root
+    is_installed || { err "Not installed yet."; return 1; }
+    if [[ -z "$(json_get CONNECT_IP "${CONF_FILE}")" ]]; then
+        warn "CONNECT_IP is empty — set the upstream server first (main menu 2)."
+    fi
+    systemctl enable --now "${APP_NAME}" && ok "Service enabled and started."
+}
+
+stop_svc() {
+    need_root
+    systemctl stop "${APP_NAME}" && ok "Service stopped."
+}
+
+restart_svc() {
+    need_root
+    is_installed || { err "Not installed yet."; return 1; }
+    systemctl restart "${APP_NAME}" && ok "Service restarted."
+    systemctl --no-pager --full status "${APP_NAME}" 2>/dev/null | head -12
+}
+
 show_stats() {
     if ! systemctl is-active --quiet "${APP_NAME}"; then
         err "Service is not running."
@@ -435,7 +657,7 @@ show_stats() {
     trap 'trap - INT; return 0' INT
     while true; do
         clear
-        printf '%s\n' "${TURQ}═══ FakeSNI Stats — $(date '+%H:%M:%S') ═══${RST}"
+        printf '%s\n' "${C6}═══ FakeSNI Stats — $(date '+%H:%M:%S') ═══${RST}"
         curl -s --max-time 1 "${STATS_URL}/" | python3 -m json.tool 2>/dev/null \
             || warn "Stats endpoint did not respond."
         sleep 2
@@ -448,14 +670,14 @@ view_mgr_log() {
         warn "Manager log is empty — no actions recorded yet."
         return 0
     fi
-    info "Manager log (colored) — press q to exit in less"
+    info "Manager log (colored) — press q to exit"
     {
         while IFS= read -r line; do
             case "$line" in
-                *'[OK]'*)   printf '%s\n' "${BG_GREEN}${FG_WHITE}${BOLD}  ${line}  ${RST}" ;;
-                *'[ERR]'*)  printf '%s\n' "${BG_RED}${FG_WHITE}${BOLD}  ${line}  ${RST}" ;;
-                *'[WARN]'*) printf '%s\n' "${BG_YELLOW}${FG_WHITE}${BOLD}  ${line}  ${RST}" ;;
-                *'[INFO]'*) printf '%s\n' "${BG_BLUE}${FG_WHITE}${BOLD}  ${line}  ${RST}" ;;
+                *'[OK]'*)   printf '%s\n' "${BG_GREEN}${FG_BOLD_WHITE}  ${line}  ${RST}" ;;
+                *'[ERR]'*)  printf '%s\n' "${BG_RED}${FG_BOLD_WHITE}  ${line}  ${RST}" ;;
+                *'[WARN]'*) printf '%s\n' "${BG_YELLOW}${FG_BOLD_WHITE}  ${line}  ${RST}" ;;
+                *'[INFO]'*) printf '%s\n' "${BG_BLUE}${FG_BOLD_WHITE}  ${line}  ${RST}" ;;
                 *) printf '%s\n' "$line" ;;
             esac
         done < "${MGR_LOG}"
@@ -464,8 +686,8 @@ view_mgr_log() {
 
 tail_logs() {
     printf '%s\n' "Which log?"
-    printf '%s\n' "  ${M3}[1]${RST}  ${TURQ}Service log (journalctl -f)${RST}"
-    printf '%s\n' "  ${M7}[2]${RST}  ${PURPLE}Manager log (colored viewer)${RST}"
+    printf '%s\n' "  ${C1}[1]${RST}  ${C1}Service log (journalctl -f)${RST}"
+    printf '%s\n' "  ${C3}[2]${RST}  ${C3}Manager log (colored viewer)${RST}"
     read -r -p "Choice [1]: " c
     c=${c:-1}
     case "$c" in
@@ -483,35 +705,16 @@ tail_logs() {
     esac
 }
 
-restart_svc() {
-    need_root
-    is_installed || { err "Not installed yet."; return 1; }
-    systemctl restart "${APP_NAME}" && ok "Service restarted."
-    systemctl --no-pager --full status "${APP_NAME}" 2>/dev/null | head -12
-}
-
-stop_svc() {
-    need_root
-    systemctl stop "${APP_NAME}" && ok "Service stopped."
-}
-
-start_svc() {
-    need_root
-    is_installed || { err "Not installed yet."; return 1; }
-    if [[ -z "$(json_get CONNECT_IP "${CONF_FILE}")" ]]; then
-        warn "CONNECT_IP is empty — set the upstream server first (menu 2)."
-    fi
-    systemctl enable --now "${APP_NAME}" && ok "Service enabled and started."
-}
-
 backup_conf() {
     need_root
     [[ -d "${CONF_DIR}" ]] || { err "Nothing to back up."; return 1; }
     local ts; ts=$(date +%Y%m%d-%H%M%S)
     local dst="/root/fakesni-backup-${ts}.tar.gz"
-    tar -czf "$dst" -C / "etc/${APP_NAME}" 2>/dev/null \
-        && ok "Backup created: ${dst}" \
-        || err "Backup failed."
+    if tar -czf "$dst" -C / "etc/${APP_NAME}" 2>/dev/null; then
+        ok "Backup created: ${dst}"
+    else
+        err "Backup failed."
+    fi
 }
 
 restore_conf() {
@@ -543,218 +746,109 @@ uninstall_all() {
 }
 
 # =========================================================
-#  client config generation
+#  banners
 # =========================================================
-gen_client_config() {
-    [[ -f "${CONF_FILE}" ]] || { err "Install first."; return 1; }
-    local server_ip server_port
-    server_ip=$(public_ip)
-    server_port=$(json_get LISTEN_PORT "${CONF_FILE}")
-    [[ -z "$server_port" ]] && server_port="40443"
-
-    echo
-    printf '%s\n' "${TURQ}──── Generate Client Config ────${RST}"
-    printf '%s\n' "Protocol:"
-    printf '%s\n' "  ${M2}[1]${RST}  ${TURQ}VLESS${RST}"
-    printf '%s\n' "  ${M5}[2]${RST}  ${PURPLE}Trojan${RST}"
-    printf '%s\n' "  ${M9}[3]${RST}  ${TURQ}Shadowsocks${RST}"
-    read -r -p "Choice [1]: " proto
-    proto=${proto:-1}
-
-    local id sni remark type path meth
-    read -r -p "Client SNI (for real TLS handshake): " sni
-    [[ -z "$sni" ]] && { err "SNI is required"; return 1; }
-    read -r -p "Remark name [${APP_NAME}]: " remark
-    remark=${remark:-${APP_NAME}}
-
-    local link=""
-    local outbound_json=""
-
-    case "$proto" in
-        1)
-            read -r -p "UUID: " id
-            [[ -z "$id" ]] && { err "UUID is required"; return 1; }
-            read -r -p "Transport (tcp/ws) [tcp]: " type
-            type=${type:-tcp}
-            if [[ "$type" == "ws" ]]; then
-                read -r -p "Path [/]: " path; path=${path:-/}
-                link="vless://${id}@${server_ip}:${server_port}?encryption=none&security=tls&sni=${sni}&fp=chrome&type=ws&path=${path}#${remark}"
-            else
-                type="tcp"
-                link="vless://${id}@${server_ip}:${server_port}?encryption=none&security=tls&sni=${sni}&fp=chrome&type=tcp&headerType=none#${remark}"
-            fi
-            outbound_json=$(cat <<EOF
-{
-  "tag": "${APP_NAME}-outbound",
-  "protocol": "vless",
-  "settings": {
-    "vnext": [{
-      "address": "${server_ip}",
-      "port": ${server_port},
-      "users": [{"id": "${id}", "encryption": "none", "flow": ""}]
-    }]
-  },
-  "streamSettings": {
-    "network": "${type}",
-    "security": "tls",
-    "tlsSettings": {
-      "serverName": "${sni}",
-      "fingerprint": "chrome",
-      "allowInsecure": false
-    }
-  }
-}
-EOF
-)
-            ;;
-        2)
-            read -r -p "Password: " id
-            [[ -z "$id" ]] && { err "Password is required"; return 1; }
-            link="trojan://${id}@${server_ip}:${server_port}?sni=${sni}&fp=chrome#${remark}"
-            outbound_json=$(cat <<EOF
-{
-  "tag": "${APP_NAME}-outbound",
-  "protocol": "trojan",
-  "settings": {
-    "servers": [{"address": "${server_ip}", "port": ${server_port}, "password": "${id}"}]
-  },
-  "streamSettings": {
-    "network": "tcp",
-    "security": "tls",
-    "tlsSettings": {"serverName": "${sni}", "fingerprint": "chrome"}
-  }
-}
-EOF
-)
-            ;;
-        3)
-            read -r -p "Method (aes-256-gcm/chacha20-ietf-poly1305): " meth
-            [[ -z "$meth" ]] && { err "Method is required"; return 1; }
-            read -r -p "Password: " id
-            [[ -z "$id" ]] && { err "Password is required"; return 1; }
-            local b64; b64=$(printf "%s:%s" "$meth" "$id" | base64 -w0)
-            link="ss://${b64}@${server_ip}:${server_port}#${remark}"
-            outbound_json=$(cat <<EOF
-{
-  "tag": "${APP_NAME}-outbound",
-  "protocol": "shadowsocks",
-  "settings": {
-    "servers": [{
-      "address": "${server_ip}", "port": ${server_port},
-      "method": "${meth}", "password": "${id}"
-    }]
-  }
-}
-EOF
-)
-            ;;
-        *) err "Invalid choice"; return 1 ;;
-    esac
-
-    echo
-    printf '%s\n' "${TURQ}─── Shareable link (v2rayNG / NekoBox / Hiddify) ───${RST}"
-    printf '%s\n' "$link"
-    echo
-    if command -v qrencode >/dev/null 2>&1; then
-        printf '%s\n' "${PURPLE}─── QR Code ───${RST}"
-        qrencode -t ANSIUTF8 "$link"
-    else
-        warn "qrencode is not installed; install it via option 1 to get QR codes."
-    fi
-    echo
-    printf '%s\n' "${TURQ}─── JSON outbound (for 3x-ui) ───${RST}"
-    printf '%s\n' "$outbound_json"
-    echo
-    info "Architecture:"
-    cat <<'DIAG'
-    ┌─────────────┐      ┌────────────────┐      ┌──────────────┐
-    │  Client     │─────▶│  Local server  │─────▶│  Upstream    │
-    │  (mobile)   │      │  (this host)   │      │  (Xray/3x-ui)│
-    └─────────────┘      └────────────────┘      └──────────────┘
-                          proxy lives here
-
-    Client uses the link above to reach this server. The server
-    forwards the traffic to the upstream using an SNI from the pool.
-DIAG
-
-    if command -v xclip >/dev/null 2>&1; then
-        echo "$link" | xclip -selection clipboard 2>/dev/null && ok "Link copied to clipboard."
-    elif command -v pbcopy >/dev/null 2>&1; then
-        echo "$link" | pbcopy && ok "Link copied to clipboard."
-    fi
-}
-
-# =========================================================
-#  banner & main menu
-# =========================================================
-banner() {
-    clear
+_banner_header() {
     local status ip inst_badge stat_badge
     status=$(service_status)
     ip=$(public_ip)
 
     if is_installed; then
-        inst_badge="${BG_GREEN}${FG_WHITE}${BOLD}  INSTALLED  ${RST}"
+        inst_badge="${BG_GREEN}${FG_BOLD_WHITE}  INSTALLED  ${RST}"
     else
-        inst_badge="${BG_RED}${FG_WHITE}${BOLD}  NOT INSTALLED  ${RST}"
+        inst_badge="${BG_RED}${FG_BOLD_WHITE}  NOT INSTALLED  ${RST}"
     fi
     if [[ "$status" == "active" ]]; then
-        stat_badge="${BG_GREEN}${FG_WHITE}${BOLD}  ACTIVE  ${RST}"
+        stat_badge="${BG_GREEN}${FG_BOLD_WHITE}  ACTIVE  ${RST}"
     else
-        stat_badge="${BG_RED}${FG_WHITE}${BOLD}  INACTIVE  ${RST}"
+        stat_badge="${BG_RED}${FG_BOLD_WHITE}  INACTIVE  ${RST}"
     fi
 
-    printf '%s\n' "${TURQ}╔══════════════════════════════════════════════════╗${RST}"
-    printf '%s\n' "${PURPLE}║${BOLD}${FG_WHITE}              FakeSNI Manager                     ${RST}${PURPLE}║${RST}"
-    printf '%s\n' "${TURQ}║${DIM}${FG_WHITE}            TCP proxy with SNI spoof              ${RST}${TURQ}║${RST}"
-    printf '%s\n' "${PURPLE}╚══════════════════════════════════════════════════╝${RST}"
+    # rainbow title box
+    printf '%s\n' "${C1}╔══════════════════════════════════════════════════╗${RST}"
+    printf '%s\n' "${C2}║${BOLD}${FG_WHITE}              FakeSNI Manager                     ${RST}${C2}║${RST}"
+    printf '%s\n' "${C3}║${DIM}${FG_WHITE}            TCP proxy with SNI spoof              ${RST}${C3}║${RST}"
+    printf '%s\n' "${C4}╚══════════════════════════════════════════════════╝${RST}"
     echo
     printf '%s\n' "  Installation: ${inst_badge}"
     printf '%s\n' "  Service:      ${stat_badge}"
     printf '%s\n' "  Server IP:    ${BOLD}${FG_WHITE}${ip}${RST}"
     echo
-    hr_turq
+}
+
+main_banner() {
+    clear
+    _banner_header
+    printf '%s\n' "${C6}──────────────────────────────────────────────────${RST}"
     printf '%s\n' "                    ${BOLD}Main Menu${RST}"
-    hr_purple
-    printf '%s\n' "  ${BOLD}${M1}[ 1]${RST}  ${TURQ}Install & initial setup${RST}"
-    printf '%s\n' "  ${BOLD}${M2}[ 2]${RST}  ${PURPLE}Set upstream server${RST}"
-    printf '%s\n' "  ${BOLD}${M3}[ 3]${RST}  ${TURQ}Manage SNI pool${RST}"
-    printf '%s\n' "  ${BOLD}${M4}[ 4]${RST}  ${PURPLE}Generate client config${RST}"
-    printf '%s\n' "  ${BOLD}${M5}[ 5]${RST}  ${TURQ}Change bypass strategy${RST}"
-    printf '%s\n' "  ${BOLD}${M6}[ 6]${RST}  ${PURPLE}Show live stats${RST}"
-    printf '%s\n' "  ${BOLD}${M7}[ 7]${RST}  ${TURQ}View logs${RST}"
-    printf '%s\n' "  ${BOLD}${M8}[ 8]${RST}  ${PURPLE}Start service${RST}"
-    printf '%s\n' "  ${BOLD}${M9}[ 9]${RST}  ${TURQ}Stop service${RST}"
-    printf '%s\n' "  ${BOLD}${M10}[10]${RST}  ${PURPLE}Restart service${RST}"
-    printf '%s\n' "  ${BOLD}${M11}[11]${RST}  ${TURQ}Backup config${RST}"
-    printf '%s\n' "  ${BOLD}${M12}[12]${RST}  ${PURPLE}Restore config${RST}"
-    printf '%s\n' "  ${BOLD}${M13}[13]${RST}  ${TURQ}Update from git${RST}"
-    printf '%s\n' "  ${BOLD}${M14}[14]${RST}  ${PURPLE}Uninstall everything${RST}"
-    printf '%s\n' "  ${BOLD}${FG_GRAY}[ 0]${RST}  ${FG_GRAY}Exit${RST}"
-    hr_turq
+    printf '%s\n' "${C6}──────────────────────────────────────────────────${RST}"
+    printf '%s\n' "  ${BOLD}${C1}[1]${RST}  ${C1}Install & initial setup${RST}"
+    printf '%s\n' "  ${BOLD}${C2}[2]${RST}  ${C2}Set upstream server${RST}"
+    printf '%s\n' "  ${BOLD}${C3}[3]${RST}  ${C3}Manage SNI pool${RST}"
+    printf '%s\n' "  ${BOLD}${C4}[4]${RST}  ${C4}Generate client config${RST}"
+    printf '%s\n' "  ${BOLD}${C5}[5]${RST}  ${C5}Change bypass strategy${RST}"
+    printf '%s\n' "  ${BOLD}${C6}[6]${RST}  ${C6}Show current configuration${RST}"
+    printf '%s\n' "  ${BOLD}${C7}[7]${RST}  ${C7}Manager (service, logs, backup, update, uninstall)...${RST}"
+    printf '%s\n' "  ${BOLD}${FG_GRAY}[0]${RST}  ${FG_GRAY}Exit${RST}"
+    printf '%s\n' "${C6}──────────────────────────────────────────────────${RST}"
+}
+
+manager_banner() {
+    clear
+    _banner_header
+    printf '%s\n' "${C9}──────────────────────────────────────────────────${RST}"
+    printf '%s\n' "                  ${BOLD}Manager Menu${RST}"
+    printf '%s\n' "${C9}──────────────────────────────────────────────────${RST}"
+    printf '%s\n' "  ${BOLD}${C1}[1]${RST}  ${C1}Start service${RST}"
+    printf '%s\n' "  ${BOLD}${C2}[2]${RST}  ${C2}Stop service${RST}"
+    printf '%s\n' "  ${BOLD}${C3}[3]${RST}  ${C3}Restart service${RST}"
+    printf '%s\n' "  ${BOLD}${C4}[4]${RST}  ${C4}Show live stats${RST}"
+    printf '%s\n' "  ${BOLD}${C5}[5]${RST}  ${C5}View logs${RST}"
+    printf '%s\n' "  ${BOLD}${C6}[6]${RST}  ${C6}Backup config${RST}"
+    printf '%s\n' "  ${BOLD}${C7}[7]${RST}  ${C7}Restore config${RST}"
+    printf '%s\n' "  ${BOLD}${C8}[8]${RST}  ${C8}Update from git${RST}"
+    printf '%s\n' "  ${BOLD}${C9}[9]${RST}  ${C9}Uninstall everything${RST}"
+    printf '%s\n' "  ${BOLD}${FG_GRAY}[0]${RST}  ${FG_GRAY}Back to main menu${RST}"
+    printf '%s\n' "${C9}──────────────────────────────────────────────────${RST}"
+}
+
+# =========================================================
+#  menus
+# =========================================================
+manager_menu() {
+    while true; do
+        manager_banner
+        read -r -p "Choice: " choice
+        case "$choice" in
+            1) start_svc;       pause ;;
+            2) stop_svc;        pause ;;
+            3) restart_svc;     pause ;;
+            4) show_stats ;;
+            5) tail_logs ;;
+            6) backup_conf;     pause ;;
+            7) restore_conf;    pause ;;
+            8) update_from_git; pause ;;
+            9) uninstall_all;   pause ;;
+            0) return 0 ;;
+            *) warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
 }
 
 main_menu() {
     while true; do
-        banner
+        main_banner
         read -r -p "Choice: " choice
         case "$choice" in
-            1)  do_install;         pause ;;
-            2)  set_upstream;       pause ;;
-            3)  manage_sni ;;
-            4)  gen_client_config;  pause ;;
-            5)  change_strategy;    pause ;;
-            6)  show_stats ;;
-            7)  tail_logs ;;
-            8)  start_svc;          pause ;;
-            9)  stop_svc;           pause ;;
-            10) restart_svc;        pause ;;
-            11) backup_conf;        pause ;;
-            12) restore_conf;       pause ;;
-            13) update_from_git;    pause ;;
-            14) uninstall_all;      pause ;;
-            0)  echo; exit 0 ;;
-            *)  warn "Invalid choice."; sleep 1 ;;
+            1) do_install;        pause ;;
+            2) set_upstream;      pause ;;
+            3) manage_sni ;;
+            4) gen_client_config; pause ;;
+            5) change_strategy;   pause ;;
+            6) show_config_file;  pause ;;
+            7) manager_menu ;;
+            0) echo; exit 0 ;;
+            *) warn "Invalid choice."; sleep 1 ;;
         esac
     done
 }
