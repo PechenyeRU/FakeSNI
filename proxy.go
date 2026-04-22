@@ -144,7 +144,9 @@ func (p *Proxy) handle(ctx context.Context, in *net.TCPConn) {
 
 	clientToServer := func() error {
 		if p.cfg.FragmentEnable {
-			if err := p.fragmentFirstRecord(in, out); err != nil {
+			fragN, err := p.fragmentFirstRecord(in, out)
+			p.stats.BytesOut.Add(fragN)
+			if err != nil {
 				return err
 			}
 		}
@@ -174,24 +176,23 @@ func (p *Proxy) handle(ctx context.Context, in *net.TCPConn) {
 }
 
 // fragmentFirstRecord reads the first TLS record from in and forwards it to
-// out in several small segments. Subsequent data flows via plain io.Copy.
-func (p *Proxy) fragmentFirstRecord(in net.Conn, out net.Conn) error {
+// out split into 2-4 TCP segments. Returns bytes written to out.
+func (p *Proxy) fragmentFirstRecord(in net.Conn, out net.Conn) (int64, error) {
 	hdr := make([]byte, 5)
 	if _, err := io.ReadFull(in, hdr); err != nil {
-		return err
+		return 0, err
 	}
 	if hdr[0] != 0x16 {
-		if _, err := out.Write(hdr); err != nil {
-			return err
-		}
-		return nil
+		n, err := out.Write(hdr)
+		return int64(n), err
 	}
 	recLen := int(hdr[3])<<8 | int(hdr[4])
 	body := make([]byte, recLen)
 	if _, err := io.ReadFull(in, body); err != nil {
-		return err
+		return 0, err
 	}
 	full := append(hdr, body...)
+	total := len(full)
 
 	lo := p.cfg.FragmentSizeMin
 	hi := p.cfg.FragmentSizeMax
@@ -201,35 +202,48 @@ func (p *Proxy) fragmentFirstRecord(in net.Conn, out net.Conn) error {
 	if hi < lo {
 		hi = lo
 	}
+	if hi > total-1 {
+		hi = total - 1
+	}
 
-	first := lo + randIntn(hi-lo+1)
-	if first >= len(full) {
-		first = len(full) / 2
+	first := lo
+	if hi > lo {
+		first = lo + randIntn(hi-lo+1)
+	}
+	if first < 1 {
+		first = 1
+	}
+	if first >= total {
+		first = total / 2
 		if first < 1 {
 			first = 1
 		}
 	}
 
+	// Split remainder into one or two additional chunks, giving a total of
+	// 2-3 segments. Keep per-chunk delays small (≤5ms) so aggregate latency
+	// added to the handshake stays under ~15ms.
 	chunks := [][]byte{full[:first]}
 	rest := full[first:]
-	for len(rest) > 0 {
-		// Remaining segments use random sizes between 8 and 64, enough to look
-		// like natural MTU-bounded fragments without being tiny.
-		size := 8 + randIntn(57)
-		if size > len(rest) {
-			size = len(rest)
+	if len(rest) > 0 {
+		if len(rest) > 64 && randIntn(2) == 0 {
+			mid := len(rest)/2 + randIntn(len(rest)/4+1)
+			chunks = append(chunks, rest[:mid], rest[mid:])
+		} else {
+			chunks = append(chunks, rest)
 		}
-		chunks = append(chunks, rest[:size])
-		rest = rest[size:]
 	}
 
+	var written int64
 	for i, ch := range chunks {
-		if _, err := out.Write(ch); err != nil {
-			return err
+		n, err := out.Write(ch)
+		written += int64(n)
+		if err != nil {
+			return written, err
 		}
 		if i+1 < len(chunks) {
-			time.Sleep(time.Duration(5+randIntn(15)) * time.Millisecond)
+			time.Sleep(time.Duration(1+randIntn(5)) * time.Millisecond)
 		}
 	}
-	return nil
+	return written, nil
 }
