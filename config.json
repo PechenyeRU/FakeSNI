@@ -1,9 +1,27 @@
 {
   "LISTEN_HOST": "0.0.0.0",
   "LISTEN_PORT": 40443,
-  "CONNECT_IP": "188.114.98.0",
+  "CONNECT_IP": "",
   "CONNECT_PORT": 443,
-  "FAKE_SNI": "auth.vercel.com",
+  "SNI_POOL": [
+    "www.digikala.com",
+    "www.aparat.com",
+    "snapp.ir",
+    "divar.ir",
+    "www.shaparak.ir",
+    "mci.ir",
+    "www.bmi.ir",
+    "www.irancell.ir"
+  ],
+  "SNI_STRATEGY": "sticky_per_connection",
+  "BYPASS_STRATEGY": "hybrid",
+  "LOW_TTL_VALUE": 8,
+  "FRAGMENT_CLIENT_HELLO": true,
+  "FRAGMENT_SIZE_MIN": 1,
+  "FRAGMENT_SIZE_MAX": 50,
   "QUEUE_NUM": 100,
-  "HANDSHAKE_TIMEOUT_MS": 2000
+  "HANDSHAKE_TIMEOUT_MS": 2000,
+  "LOG_LEVEL": "INFO",
+  "LOG_FILE": "/var/log/fakesni/service.log",
+  "STATS_ADDR": "127.0.0.1:9999"
 }
