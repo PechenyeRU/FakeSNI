@@ -1,142 +1,115 @@
 # FakeSNI
 
-A fast, clean Go port of [patterniha/SNI-Spoofing](https://github.com/patterniha/SNI-Spoofing)
-for **Linux**. It runs a TCP proxy that, for each outbound connection, injects
-a fake TLS `ClientHello` carrying a decoy SNI right after the TCP handshake.
-The fake segment is crafted with a deliberately out-of-window sequence number,
-so the remote server discards the payload while any on-path DPI still ingests
-the decoy SNI and lets the real traffic through.
+A tiny Linux helper that keeps your tunnel alive on networks that throttle
+"unknown" foreign connections but let *allowed* sites through.
 
-## How it works
+Some national firewalls choke any foreign connection to a crawl unless the very
+first packet looks like it's heading to an approved website. If your server sits
+behind a CDN, that's enough to kill it. FakeSNI sits in front of your tunnel and
+makes the connection *look* approved, so the firewall stops throttling it — while
+your traffic still reaches your real server.
 
-```
- client ──► fakesni (TCP proxy) ──► real server
-                 │
-                 │  NFQUEUE observes SYN / SYN-ACK / ACK
-                 │  raw socket injects fake ClientHello
-                 ▼
-       on-path DPI sees "fake SNI"
-```
-
-1. The proxy accepts a client and opens a TCP connection to the configured
-   remote.
-2. Before `connect()` is issued, the connection's 4-tuple is registered with
-   the injector so the NFQUEUE callback never races the SYN.
-3. The injector captures the SYN / SYN-ACK sequence numbers through NFQUEUE.
-4. As soon as the final ACK of the handshake goes out, the injector sends an
-   extra TCP segment over a raw socket containing the fake `ClientHello` with
-   `seq = syn_seq + 1 - len(payload)` (old, out-of-window).
-5. The server replies with a duplicate ACK (it ignores the stale bytes). That
-   dup-ACK is the signal the proxy waits on before forwarding any real data.
-6. The connection is removed from the tracking map — subsequent packets take
-   the NFQUEUE fast path (accept without lookup).
-
-The Linux port uses **NFQUEUE + raw socket** instead of `pydivert/WinDivert`.
-eBPF was considered but doesn't fit this workload: the bypass needs async
-userspace timing (~1 ms delay between the real ACK and the fake segment) and
-one-off packet crafting, which is awkward inside a TC/XDP program. NFQUEUE
-gives the same pydivert-style model with mature Go bindings.
-
-## Requirements
-
-- Linux with `iptables` and `nf_conntrack_netlink` (standard on any modern distro).
-- Root (needed for NFQUEUE, raw sockets, and tweaking conntrack sysctl).
-- Go 1.22+ to build.
-
-Dependencies (all fetched via `go mod`):
-
-- `github.com/florianl/go-nfqueue`
-- `github.com/google/gopacket`
-- `golang.org/x/sys`
+You run it next to your tunnel client (sing-box, Xray, …) and point the client
+at FakeSNI instead of straight at the server.
 
 ## Build
 
+You need [Go](https://go.dev/dl/) (1.25+) and a Linux box.
+
 ```sh
+git clone https://github.com/PechenyeRU/FakeSNI && cd FakeSNI
 go build -o fakesni .
 ```
 
-## Configuration
+That's it — one binary, no other tools to install.
 
-Edit `config.json`:
+## Configure
+
+Copy `config.json` and edit it:
 
 ```json
 {
-  "LISTEN_HOST": "0.0.0.0",
+  "LISTEN_HOST": "127.0.0.1",
   "LISTEN_PORT": 40443,
-  "CONNECT_IP": "188.114.98.0",
+  "CONNECT_IP": "104.21.0.0",
   "CONNECT_PORT": 443,
-  "FAKE_SNI": "auth.vercel.com",
-  "QUEUE_NUM": 100,
-  "HANDSHAKE_TIMEOUT_MS": 2000
+  "WHITE_SNI": "www.speedtest.net"
 }
 ```
 
-| Field                   | Required | Default | Description |
-|-------------------------|:--------:|---------|-------------|
-| `LISTEN_HOST`           | yes      | —       | Address the proxy listens on. |
-| `LISTEN_PORT`           | yes      | —       | Port the proxy listens on. |
-| `CONNECT_IP`            | yes      | —       | IPv4 of the real upstream server. |
-| `CONNECT_PORT`          | yes      | —       | Port on the upstream server. |
-| `FAKE_SNI`              | yes      | —       | Decoy hostname to put in the fake `ClientHello`. |
-| `INTERFACE_IP`          | no       | auto    | Source IPv4 to bind outbound sockets to. Auto-detected from the route to `CONNECT_IP` if omitted. |
-| `QUEUE_NUM`             | no       | `100`   | NFQUEUE number used for the iptables rule. |
-| `HANDSHAKE_TIMEOUT_MS`  | no       | `2000`  | Max time to wait for the fake-ack before giving up on a connection. |
-| `NO_IPTABLES_SETUP`     | no       | `false` | If true, `fakesni` will not install/remove iptables rules. You are responsible for pointing traffic into the queue yourself. |
-| `NO_CONNTRACK_TWEAK`    | no       | `false` | If true, skip enabling `nf_conntrack_tcp_be_liberal` (see below). |
+| Field          | What to put |
+|----------------|-------------|
+| `LISTEN_HOST`  | Where FakeSNI listens. `127.0.0.1` is fine. |
+| `LISTEN_PORT`  | Any free port. Your tunnel client will connect here. |
+| `CONNECT_IP`   | The IP your tunnel normally connects to (e.g. a Cloudflare IP for your domain). |
+| `CONNECT_PORT` | Usually `443`. |
+| `WHITE_SNI`    | A site that the network currently lets through. `www.speedtest.net` is a common one. If it stops working, try another allowed site. |
 
-## Running
+Those five fields are all you need. (A few more knobs exist with sensible
+defaults — see `config.go` if you ever want to tune them.)
+
+Every field can also be set with an environment variable named
+`FAKESNI_<FIELD>` (e.g. `FAKESNI_WHITE_SNI=www.speedtest.net`). Env vars win
+over the file, and if you set all the required ones you don't even need a config
+file — convenient for Docker.
+
+## Run
 
 ```sh
 sudo ./fakesni -config config.json
 ```
 
-Then point your client at `LISTEN_HOST:LISTEN_PORT` (for example, use it as
-the upstream of a local HTTP client, or chain it behind another proxy that
-forwards raw TCP to this port).
+(`sudo` is needed because it works at the raw-packet level.)
 
-### What `fakesni` touches on the system
+Then point your tunnel client at `LISTEN_HOST:LISTEN_PORT`.
 
-By default, at startup it will:
+### Run with Docker
 
-1. Set `/proc/sys/net/netfilter/nf_conntrack_tcp_be_liberal` to `1` so the
-   kernel conntrack doesn't drop our out-of-window fake segment. The
-   previous value is restored on clean shutdown.
-2. Insert two iptables rules redirecting all TCP traffic between
-   `INTERFACE_IP` and `CONNECT_IP:CONNECT_PORT` to NFQUEUE:
+A prebuilt image is published to GHCR for amd64, arm64 and armv7. Pass the
+config via env vars (no file to mount):
 
-   ```
-   iptables -I OUTPUT -p tcp -s <iface> -d <CONNECT_IP> --dport <CONNECT_PORT> \
-            -j NFQUEUE --queue-num <QUEUE_NUM> --queue-bypass
-   iptables -I INPUT  -p tcp -s <CONNECT_IP> --sport <CONNECT_PORT> -d <iface> \
-            -j NFQUEUE --queue-num <QUEUE_NUM> --queue-bypass
-   ```
-
-   Both rules are removed on clean shutdown. If the process is killed with
-   `SIGKILL` or crashes, run these by hand to clean up:
-
-   ```sh
-   sudo iptables -D OUTPUT -p tcp -s <iface> -d <CONNECT_IP> --dport <port> \
-        -j NFQUEUE --queue-num 100 --queue-bypass
-   sudo iptables -D INPUT  -p tcp -s <CONNECT_IP> --sport <port> -d <iface> \
-        -j NFQUEUE --queue-num 100 --queue-bypass
-   ```
-
-Set `NO_IPTABLES_SETUP` / `NO_CONNTRACK_TWEAK` to `true` in the config if you
-prefer to manage these yourself.
-
-## Project layout
-
+```sh
+docker run -d --name fakesni \
+  --network host --cap-add NET_RAW \
+  -e FAKESNI_LISTEN_HOST=127.0.0.1 \
+  -e FAKESNI_LISTEN_PORT=40443 \
+  -e FAKESNI_CONNECT_IP=104.21.0.0 \
+  -e FAKESNI_CONNECT_PORT=443 \
+  -e FAKESNI_WHITE_SNI=www.speedtest.net \
+  ghcr.io/pechenyeru/fakesni:latest
 ```
-main.go         entry point, config loading, signal handling
-config.go       JSON config
-proxy.go        TCP accept/dial/relay, coordinates with the injector
-injector.go     NFQUEUE handler, raw-socket packet crafting, conn tracking
-clienthello.go  minimal TLS ClientHello builder with SNI extension
-system.go       iptables + conntrack sysctl setup & cleanup
-config.json     sample configuration
+
+`--network host` and `--cap-add NET_RAW` are required because it works at the
+raw-packet level. (If you prefer a file, mount it: `-v "$(pwd)/config.json:/config.json:ro"`.)
+
+### Example: sing-box (VLESS)
+
+Change your VLESS outbound so it dials FakeSNI instead of the server directly —
+keep the TLS server name and everything else the same:
+
+```json
+{
+  "type": "vless",
+  "server": "127.0.0.1",
+  "server_port": 40443,
+  "uuid": "…",
+  "tls": { "enabled": true, "server_name": "your-domain.example" },
+  "transport": { "type": "ws", "path": "/…", "headers": { "Host": "your-domain.example" } }
+}
 ```
+
+Set FakeSNI's `CONNECT_IP` to the IP your client used to connect to before.
+
+## Notes
+
+- Only the *upload* direction is throttled by these firewalls, so downloads run
+  at full speed once a connection is established.
+- `WHITE_SNI` is the only thing that "expires": if the network changes which
+  sites it allows, swap in another allowed site.
+- Linux only.
 
 ## Credits
 
-Original Python implementation and bypass technique:
-[patterniha/SNI-Spoofing](https://github.com/patterniha/SNI-Spoofing).
+Successor to [patterniha/SNI-Spoofing](https://github.com/patterniha/SNI-Spoofing).
+For getting your own connection through censorship. It doesn't touch anyone
+else's systems.
