@@ -35,13 +35,15 @@ type synInfo struct {
 // kernel's real ClientHello. The decoy MUST be a genuine ClientHello - a minimal
 // hand-built one makes the server silently drop the whole flow.
 type Injector struct {
-	cfg     *Config
-	rawSend int
-	rawRecv int
-	rawMu   sync.Mutex
-	decoy   []byte
-	ifaceIP [4]byte
-	dstIP   [4]byte
+	cfg      *Config
+	rawSend  int
+	rawRecv  int
+	rawMu    sync.Mutex
+	decoy    []byte
+	ifaceIP  [4]byte
+	dstIP    [4]byte
+	decoyMD5 bool  // tag the decoy so the server drops it (md5 mode)
+	decoyTTL uint8 // ip ttl for decoy segments
 
 	syn sync.Map // uint16(srcPort) -> synInfo
 }
@@ -66,6 +68,16 @@ func NewInjector(cfg *Config) (*Injector, error) {
 	inj := &Injector{cfg: cfg, rawSend: send, rawRecv: recv, decoy: BuildClientHello(cfg.WhiteSNI)}
 	copy(inj.ifaceIP[:], net.ParseIP(cfg.InterfaceIP).To4())
 	copy(inj.dstIP[:], net.ParseIP(cfg.ConnectIP).To4())
+	switch cfg.DecoyMode {
+	case "ttl":
+		// valid packet that expires in transit before the server (no md5 needed)
+		inj.decoyMD5, inj.decoyTTL = false, uint8(cfg.DecoyTTL)
+		log.Printf("decoy mode: ttl (ttl=%d)", cfg.DecoyTTL)
+	default:
+		// md5: reaches the server, which drops it (md5 on a non-md5 socket)
+		inj.decoyMD5, inj.decoyTTL = true, 64
+		log.Printf("decoy mode: md5")
+	}
 
 	// Filter the recv socket in-kernel to only SYN-ACKs from the server, so bulk
 	// inbound traffic (downloads) doesn't wake userspace. Best-effort: parseSynAck
@@ -167,8 +179,8 @@ func (inj *Injector) WaitSynAck(srcPort uint16) (synInfo, error) {
 const uMSS = 1388
 
 // InjectDecoy raw-sends the given decoy at the connection's first data byte,
-// segmented into MSS-sized pieces (each MD5-fooled) so it overlaps the real
-// ClientHello's segments at the same sequence numbers, then holds DecoyDelayMs.
+// segmented into MSS-sized pieces tagged per the decoy mode (md5 or short ttl),
+// at the same sequence numbers as the real ClientHello, then holds DecoyDelayMs.
 func (inj *Injector) InjectDecoy(srcPort uint16, info synInfo, decoy []byte) error {
 	seq := info.ourSeqP1
 	for off := 0; off < len(decoy); off += uMSS {
@@ -200,7 +212,7 @@ func (inj *Injector) inject(srcPort uint16, seq, ack uint32) error {
 
 func (inj *Injector) injectAt(srcPort uint16, seq, ack uint32, payload []byte) error {
 	frame, err := buildSeg(inj.ifaceIP, inj.dstIP, srcPort, uint16(inj.cfg.ConnectPort),
-		seq, ack, fPSH|fACK, payload, true)
+		seq, ack, fPSH|fACK, payload, inj.decoyMD5, inj.decoyTTL)
 	if err != nil {
 		return err
 	}
@@ -221,12 +233,13 @@ const (
 	fACK = 0x10
 )
 
-// buildSeg serializes an IPv4+TCP segment, optionally with a TCP-MD5 option.
-func buildSeg(src, dst [4]byte, sport, dport uint16, seq, ack uint32, flags uint8, payload []byte, md5 bool) ([]byte, error) {
+// buildSeg serializes an IPv4+TCP segment with the given TTL, optionally with a
+// TCP-MD5 option.
+func buildSeg(src, dst [4]byte, sport, dport uint16, seq, ack uint32, flags uint8, payload []byte, md5 bool, ttl uint8) ([]byte, error) {
 	ip := &layers.IPv4{
 		Version:  4,
 		IHL:      5,
-		TTL:      64,
+		TTL:      ttl,
 		Protocol: layers.IPProtocolTCP,
 		SrcIP:    net.IP(src[:]),
 		DstIP:    net.IP(dst[:]),
