@@ -112,15 +112,15 @@ Set FakeSNI's `CONNECT_IP` to the IP your client used to connect to before.
 
 The default works from a lot of connections. On some networks it doesn't land
 right — your tunnel either won't connect (TLS / "decode" errors) or stays
-throttled. In that case try the alternative mode by adding two fields:
+throttled. In that case try the alternative mode by adding one field:
 
 ```json
-"DECOY_MODE": "ttl",
-"DECOY_TTL": 8
+"DECOY_MODE": "ttl"
 ```
 
-`DECOY_TTL` is a small number you tune to your own connection. Start around 6–10
-and change it by one at a time:
+It calibrates itself to your connection on startup. If the automatic value turns
+out wrong, you can pin it by hand with `DECOY_TTL` (a small number, usually
+6–12) and adjust by one:
 
 - connects but slow → raise it
 - TLS / "decode" errors → lower it
