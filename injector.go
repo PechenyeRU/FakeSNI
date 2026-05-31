@@ -22,10 +22,12 @@ var debug = os.Getenv("FAKESNI_DEBUG") != ""
 var ErrBypassTimeout = errors.New("bypass timeout: SYN-ACK not observed")
 
 // synInfo is derived from the inbound SYN-ACK: its ack field is our SYN seq + 1
-// (where the ClientHello starts), its seq is the server's ISN.
+// (where the ClientHello starts), its seq is the server's ISN, and srvTTL is the
+// SYN-ACK's IP TTL (used to auto-derive the decoy TTL: hops to server).
 type synInfo struct {
 	ourSeqP1 uint32
 	srvSeq   uint32
+	srvTTL   uint8
 }
 
 // Injector watches inbound SYN-ACKs for the kernel's upstream connections and
@@ -71,8 +73,27 @@ func NewInjector(cfg *Config) (*Injector, error) {
 	switch cfg.DecoyMode {
 	case "ttl":
 		// valid packet that expires in transit before the server (no md5 needed)
-		inj.decoyMD5, inj.decoyTTL = false, uint8(cfg.DecoyTTL)
-		log.Printf("decoy mode: ttl (ttl=%d)", cfg.DecoyTTL)
+		inj.decoyMD5 = false
+		switch {
+		case cfg.DecoyTTL > 0:
+			inj.decoyTTL = uint8(cfg.DecoyTTL)
+			log.Printf("decoy mode: ttl (ttl=%d)", cfg.DecoyTTL)
+		default:
+			// auto: measure the forward hop count to the server and stop a few
+			// hops short of it (past the firewall, before the server).
+			if hops, err := forwardHops(send, inj.ifaceIP, inj.dstIP, uint16(cfg.ConnectPort)); err == nil {
+				t := hops - cfg.DecoyAutoTTLDelta
+				if t < 1 {
+					t = 1
+				}
+				inj.decoyTTL = uint8(t)
+				log.Printf("decoy mode: ttl (auto: %d hops -> ttl %d)", hops, t)
+			} else {
+				// fall back to a per-connection estimate from the SYN-ACK ttl
+				inj.decoyTTL = 0
+				log.Printf("decoy mode: ttl (auto per-connection; forward probe failed: %v)", err)
+			}
+		}
 	default:
 		// md5: reaches the server, which drops it (md5 on a non-md5 socket)
 		inj.decoyMD5, inj.decoyTTL = true, 64
@@ -108,6 +129,67 @@ func attachSynAckFilter(fd int, dstIP [4]byte, port uint16) error {
 	}
 	fprog := &unix.SockFprog{Len: uint16(len(prog)), Filter: &prog[0]}
 	return unix.SetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, fprog)
+}
+
+// forwardHops measures the router-hop distance to dst:port by raw-sending TCP SYN
+// probes with increasing TTL (each from a distinct source port) and finding the
+// smallest TTL whose probe reaches the server - i.e. comes back as a SYN-ACK or
+// RST. This is the forward path length, which (unlike the SYN-ACK's own TTL) is
+// not skewed by asymmetric anycast return routing. Returns an error if the server
+// never answers (probes filtered).
+func forwardHops(send int, srcIP, dstIP [4]byte, dstPort uint16) (int, error) {
+	const base = 50000
+	const maxTTL = 30
+	r, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
+	if err != nil {
+		return 0, err
+	}
+	defer syscall.Close(r)
+	tv := syscall.Timeval{Sec: 0, Usec: 200000}
+	_ = syscall.SetsockoptTimeval(r, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+
+	sa := syscall.SockaddrInet4{Port: int(dstPort), Addr: dstIP}
+	for ttl := 1; ttl <= maxTTL; ttl++ {
+		frame, err := buildSeg(srcIP, dstIP, uint16(base+ttl), dstPort, uint32(0x10000+ttl), 0, fSYN, nil, false, uint8(ttl))
+		if err != nil {
+			continue
+		}
+		_ = syscall.Sendto(send, frame, 0, &sa)
+	}
+
+	best := 0
+	buf := make([]byte, 1500)
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		n, _, err := syscall.Recvfrom(r, buf, 0)
+		if err != nil || n < 20 {
+			continue
+		}
+		ihl := int(buf[0]&0x0f) * 4
+		if n < ihl+20 {
+			continue
+		}
+		if buf[12] != dstIP[0] || buf[13] != dstIP[1] || buf[14] != dstIP[2] || buf[15] != dstIP[3] {
+			continue
+		}
+		tcp := buf[ihl:]
+		if binary.BigEndian.Uint16(tcp[0:2]) != dstPort {
+			continue
+		}
+		dport := int(binary.BigEndian.Uint16(tcp[2:4]))
+		if dport <= base || dport > base+maxTTL {
+			continue
+		}
+		if flags := tcp[13]; flags&0x12 == 0x12 || flags&0x04 != 0 { // SYN-ACK or RST
+			if ttl := dport - base; best == 0 || ttl < best {
+				best = ttl
+			}
+		}
+	}
+	if best == 0 {
+		return 0, errors.New("server did not answer hop probes")
+	}
+	return best, nil
 }
 
 func (inj *Injector) Close() {
@@ -158,7 +240,7 @@ func (inj *Injector) parseSynAck(pkt []byte) {
 	dstPort := binary.BigEndian.Uint16(tcp[2:4])
 	seq := binary.BigEndian.Uint32(tcp[4:8])
 	ack := binary.BigEndian.Uint32(tcp[8:12])
-	inj.syn.Store(dstPort, synInfo{ourSeqP1: ack, srvSeq: seq})
+	inj.syn.Store(dstPort, synInfo{ourSeqP1: ack, srvSeq: seq, srvTTL: pkt[8]})
 }
 
 // WaitSynAck blocks until the connection's SYN-ACK has been observed and returns
@@ -178,23 +260,52 @@ func (inj *Injector) WaitSynAck(srcPort uint16) (synInfo, error) {
 
 const uMSS = 1388
 
+// ttlFor returns the IP TTL to stamp on the decoy for this connection: the fixed
+// value when set, or - in auto mode (DecoyTTL == 0) - the hop count to the server
+// derived from the SYN-ACK's TTL, minus the configured delta.
+func (inj *Injector) ttlFor(info synInfo) uint8 {
+	if inj.decoyTTL > 0 {
+		return inj.decoyTTL
+	}
+	hops := int(initialTTL(info.srvTTL)) - int(info.srvTTL)
+	t := hops - inj.cfg.DecoyAutoTTLDelta
+	if t < 1 {
+		t = 1
+	}
+	return uint8(t)
+}
+
+// initialTTL guesses the sender's original TTL from a received value (common
+// defaults are 64, 128, 255).
+func initialTTL(recv uint8) uint8 {
+	switch {
+	case recv > 128:
+		return 255
+	case recv > 64:
+		return 128
+	default:
+		return 64
+	}
+}
+
 // InjectDecoy raw-sends the given decoy at the connection's first data byte,
 // segmented into MSS-sized pieces tagged per the decoy mode (md5 or short ttl),
 // at the same sequence numbers as the real ClientHello, then holds DecoyDelayMs.
 func (inj *Injector) InjectDecoy(srcPort uint16, info synInfo, decoy []byte) error {
+	ttl := inj.ttlFor(info)
 	seq := info.ourSeqP1
 	for off := 0; off < len(decoy); off += uMSS {
 		end := off + uMSS
 		if end > len(decoy) {
 			end = len(decoy)
 		}
-		if err := inj.injectAt(srcPort, seq, info.srvSeq+1, decoy[off:end]); err != nil {
+		if err := inj.injectAt(srcPort, seq, info.srvSeq+1, decoy[off:end], ttl); err != nil {
 			return err
 		}
 		seq += uint32(end - off)
 	}
 	if debug {
-		log.Printf("decoy injected: srcPort=%d seq=%d len=%d", srcPort, info.ourSeqP1, len(decoy))
+		log.Printf("decoy injected: srcPort=%d seq=%d len=%d ttl=%d", srcPort, info.ourSeqP1, len(decoy), ttl)
 	}
 	time.Sleep(time.Duration(inj.cfg.DecoyDelayMs) * time.Millisecond)
 	return nil
@@ -202,17 +313,17 @@ func (inj *Injector) InjectDecoy(srcPort uint16, info synInfo, decoy []byte) err
 
 // inject re-sends the base decoy at the given sequence (single segment, for the
 // mid-stream refresh; bounded by MSS).
-func (inj *Injector) inject(srcPort uint16, seq, ack uint32) error {
+func (inj *Injector) inject(srcPort uint16, seq, ack uint32, ttl uint8) error {
 	d := inj.decoy
 	if len(d) > uMSS {
 		d = d[:uMSS]
 	}
-	return inj.injectAt(srcPort, seq, ack, d)
+	return inj.injectAt(srcPort, seq, ack, d, ttl)
 }
 
-func (inj *Injector) injectAt(srcPort uint16, seq, ack uint32, payload []byte) error {
+func (inj *Injector) injectAt(srcPort uint16, seq, ack uint32, payload []byte, ttl uint8) error {
 	frame, err := buildSeg(inj.ifaceIP, inj.dstIP, srcPort, uint16(inj.cfg.ConnectPort),
-		seq, ack, fPSH|fACK, payload, inj.decoyMD5, inj.decoyTTL)
+		seq, ack, fPSH|fACK, payload, inj.decoyMD5, ttl)
 	if err != nil {
 		return err
 	}

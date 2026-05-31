@@ -103,6 +103,7 @@ func (p *Proxy) handle(ctx context.Context, in *net.TCPConn) {
 // refresh re-injects the decoy at the current upstream send position every
 // DECOY_REFRESH_KB to renew whitening on long uploads.
 func (p *Proxy) refresh(srcPort uint16, info synInfo, up *atomic.Uint64, done <-chan struct{}) {
+	ttl := p.inj.ttlFor(info)
 	step := uint64(p.cfg.DecoyRefreshKB) * 1024
 	next := step
 	t := time.NewTicker(20 * time.Millisecond)
@@ -117,7 +118,7 @@ func (p *Proxy) refresh(srcPort uint16, info synInfo, up *atomic.Uint64, done <-
 				continue
 			}
 			next = n + step
-			_ = p.inj.inject(srcPort, info.ourSeqP1+uint32(n), info.srvSeq+1)
+			_ = p.inj.inject(srcPort, info.ourSeqP1+uint32(n), info.srvSeq+1, ttl)
 		}
 	}
 }

@@ -29,7 +29,10 @@ type Config struct {
 	// TTL so it expires in transit before reaching the server. Use "ttl" on
 	// paths where the md5 option does not survive (e.g. behind some home CPEs).
 	DecoyMode string `json:"DECOY_MODE"`
-	DecoyTTL  int    `json:"DECOY_TTL"`
+	// DecoyTTL is the fixed IP TTL for "ttl" mode. 0 (default) auto-derives it
+	// per connection from the SYN-ACK's TTL (hops to server minus the delta).
+	DecoyTTL          int `json:"DECOY_TTL"`
+	DecoyAutoTTLDelta int `json:"DECOY_AUTOTTL_DELTA"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -62,8 +65,8 @@ func LoadConfig(path string) (*Config, error) {
 	if c.HandshakeTimeoutMs == 0 {
 		c.HandshakeTimeoutMs = 2000
 	}
-	if c.DecoyTTL == 0 {
-		c.DecoyTTL = 6
+	if c.DecoyAutoTTLDelta == 0 {
+		c.DecoyAutoTTLDelta = 2
 	}
 	return c, nil
 }
@@ -86,6 +89,7 @@ func applyEnv(c *Config) error {
 		{"FAKESNI_DECOY_REFRESH_KB", &c.DecoyRefreshKB},
 		{"FAKESNI_HANDSHAKE_TIMEOUT_MS", &c.HandshakeTimeoutMs},
 		{"FAKESNI_DECOY_TTL", &c.DecoyTTL},
+		{"FAKESNI_DECOY_AUTOTTL_DELTA", &c.DecoyAutoTTLDelta},
 	}
 	for _, e := range ints {
 		if v := os.Getenv(e.key); v != "" {
