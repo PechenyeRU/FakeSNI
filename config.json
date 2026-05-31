@@ -1,9 +1,7 @@
 {
-  "LISTEN_HOST": "0.0.0.0",
+  "LISTEN_HOST": "127.0.0.1",
   "LISTEN_PORT": 40443,
-  "CONNECT_IP": "188.114.98.0",
+  "CONNECT_IP": "104.21.0.0",
   "CONNECT_PORT": 443,
-  "FAKE_SNI": "auth.vercel.com",
-  "QUEUE_NUM": 100,
-  "HANDSHAKE_TIMEOUT_MS": 2000
+  "WHITE_SNI": "www.speedtest.net"
 }

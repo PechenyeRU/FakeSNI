@@ -41,27 +41,11 @@ func main() {
 	log.Printf("interface ip: %s", cfg.InterfaceIP)
 
 	if os.Geteuid() != 0 {
-		log.Fatal("must run as root (NFQUEUE + raw sockets + /proc/sys writes)")
+		log.Fatal("must run as root (raw sockets)")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	if !cfg.NoConntrackTweak {
-		if restore, err := setConntrackLiberal(); err != nil {
-			log.Printf("warning: could not tweak conntrack: %v", err)
-		} else {
-			defer restore()
-		}
-	}
-
-	if !cfg.NoIptablesSetup {
-		cleanup, err := setupIptables(cfg)
-		if err != nil {
-			log.Fatalf("iptables: %v", err)
-		}
-		defer cleanup()
-	}
 
 	inj, err := NewInjector(cfg)
 	if err != nil {
@@ -69,12 +53,9 @@ func main() {
 	}
 	defer inj.Close()
 
-	go func() {
-		if err := inj.Run(ctx); err != nil {
-			log.Printf("injector stopped: %v", err)
-			cancel()
-		}
-	}()
+	done := make(chan struct{})
+	go inj.Run(done)
+	defer close(done)
 
 	prx := NewProxy(cfg, inj)
 	go func() {
@@ -94,8 +75,8 @@ func main() {
 	cancel()
 }
 
-// detectOutboundIP asks the kernel which local address would be used to
-// reach the given remote, without actually sending anything.
+// detectOutboundIP asks the kernel which local address would be used to reach
+// the given remote, without actually sending anything.
 func detectOutboundIP(remote string) (string, error) {
 	c, err := net.Dial("udp", net.JoinHostPort(remote, "1"))
 	if err != nil {

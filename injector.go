@@ -1,295 +1,250 @@
 package main
 
 import (
-	"context"
+	"encoding/binary"
 	"errors"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"syscall"
 	"time"
 
-	nfqueue "github.com/florianl/go-nfqueue"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
 	"golang.org/x/sys/unix"
 )
 
-// connKey uniquely identifies a tracked outbound 4-tuple.
-type connKey struct {
-	srcIP    [4]byte
-	dstIP    [4]byte
-	srcPort  uint16
-	dstPort  uint16
+// debug enables verbose tracing when FAKESNI_DEBUG is set.
+var debug = os.Getenv("FAKESNI_DEBUG") != ""
+
+// ErrBypassTimeout is returned when the SYN-ACK isn't observed in time.
+var ErrBypassTimeout = errors.New("bypass timeout: SYN-ACK not observed")
+
+// synInfo is derived from the inbound SYN-ACK: its ack field is our SYN seq + 1
+// (where the ClientHello starts), its seq is the server's ISN.
+type synInfo struct {
+	ourSeqP1 uint32
+	srvSeq   uint32
 }
 
-// connState holds per-connection bypass state shared between proxy and injector.
-type connState struct {
-	srcIP, dstIP     [4]byte
-	srcPort, dstPort uint16
-
-	mu            sync.Mutex
-	synSeq        uint32
-	synAckSeq     uint32
-	haveSynSeq    bool
-	haveSynAckSeq bool
-	fakeSent      bool
-	closed        bool
-
-	fakePayload []byte
-
-	done     chan struct{}
-	doneErr  error
-	doneOnce sync.Once
-}
-
-func (cs *connState) finish(err error) {
-	cs.doneOnce.Do(func() {
-		cs.doneErr = err
-		close(cs.done)
-	})
-}
-
-// Injector owns the NFQUEUE socket, a raw TCP socket for packet injection,
-// and the live connection table.
+// Injector watches inbound SYN-ACKs for the kernel's upstream connections and
+// raw-injects a white-SNI decoy ClientHello at the first data byte, carrying a
+// TCP-MD5 option. The firewall reads the decoy SNI and whitens the flow; the
+// server drops the decoy (MD5 on a non-MD5 connection, RFC 2385) and keeps the
+// kernel's real ClientHello. The decoy MUST be a genuine ClientHello - a minimal
+// hand-built one makes the server silently drop the whole flow.
 type Injector struct {
-	cfg   *Config
-	nfq   *nfqueue.Nfqueue
-	raw   int
-	rawMu sync.Mutex
-	conns sync.Map // connKey -> *connState
+	cfg     *Config
+	rawSend int
+	rawRecv int
+	rawMu   sync.Mutex
+	decoy   []byte
+	ifaceIP [4]byte
+	dstIP   [4]byte
+
+	syn sync.Map // uint16(srcPort) -> synInfo
 }
 
 func NewInjector(cfg *Config) (*Injector, error) {
-	nfcfg := nfqueue.Config{
-		NfQueue:      cfg.QueueNum,
-		MaxPacketLen: 0xffff,
-		MaxQueueLen:  8192,
-		AfFamily:     unix.AF_INET,
-		Copymode:     nfqueue.NfQnlCopyPacket,
-		WriteTimeout: 15 * time.Millisecond,
-	}
-	nfq, err := nfqueue.Open(&nfcfg)
+	send, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
 	if err != nil {
 		return nil, err
 	}
-
-	// Raw socket with IP_HDRINCL so we build the whole IP+TCP frame ourselves.
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
+	if err := syscall.SetsockoptInt(send, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1); err != nil {
+		syscall.Close(send)
+		return nil, err
+	}
+	recv, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
 	if err != nil {
-		nfq.Close()
+		syscall.Close(send)
 		return nil, err
 	}
-	if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1); err != nil {
-		syscall.Close(fd)
-		nfq.Close()
-		return nil, err
-	}
+	tv := syscall.Timeval{Sec: 0, Usec: 200000}
+	_ = syscall.SetsockoptTimeval(recv, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 
-	return &Injector{cfg: cfg, nfq: nfq, raw: fd}, nil
+	inj := &Injector{cfg: cfg, rawSend: send, rawRecv: recv, decoy: BuildClientHello(cfg.WhiteSNI)}
+	copy(inj.ifaceIP[:], net.ParseIP(cfg.InterfaceIP).To4())
+	copy(inj.dstIP[:], net.ParseIP(cfg.ConnectIP).To4())
+
+	// Filter the recv socket in-kernel to only SYN-ACKs from the server, so bulk
+	// inbound traffic (downloads) doesn't wake userspace. Best-effort: parseSynAck
+	// re-checks every packet, so an unfiltered fallback is still correct.
+	if err := attachSynAckFilter(recv, inj.dstIP, uint16(cfg.ConnectPort)); err != nil {
+		log.Printf("bpf filter not attached (continuing unfiltered): %v", err)
+	}
+	log.Printf("white decoy ClientHello: %d bytes", len(inj.decoy))
+	return inj, nil
+}
+
+// attachSynAckFilter installs a classic BPF program on the raw recv socket that
+// accepts only TCP SYN-ACK segments coming from dstIP:port. The socket delivers
+// the IPv4 header first, so offsets are relative to the start of the IP header.
+func attachSynAckFilter(fd int, dstIP [4]byte, port uint16) error {
+	srcIP := binary.BigEndian.Uint32(dstIP[:])
+	prog := []unix.SockFilter{
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 12},                          // 0: A = IP src
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 7, K: srcIP},        // 1: src == dstIP?
+		{Code: unix.BPF_LDX | unix.BPF_B | unix.BPF_MSH, K: 0},                          // 2: X = IP header len
+		{Code: unix.BPF_LD | unix.BPF_H | unix.BPF_IND, K: 0},                           // 3: A = TCP src port
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 4, K: uint32(port)}, // 4: == port?
+		{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_IND, K: 13},                          // 5: A = TCP flags
+		{Code: unix.BPF_ALU | unix.BPF_AND | unix.BPF_K, K: 0x12},                       // 6: A &= SYN|ACK
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: 0x12},         // 7: == SYN|ACK?
+		{Code: unix.BPF_RET | unix.BPF_K, K: 0x40000},                                   // 8: accept
+		{Code: unix.BPF_RET | unix.BPF_K, K: 0},                                         // 9: drop
+	}
+	fprog := &unix.SockFprog{Len: uint16(len(prog)), Filter: &prog[0]}
+	return unix.SetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, fprog)
 }
 
 func (inj *Injector) Close() {
-	if inj.nfq != nil {
-		inj.nfq.Close()
+	if inj.rawSend != 0 {
+		syscall.Close(inj.rawSend)
 	}
-	if inj.raw != 0 {
-		syscall.Close(inj.raw)
+	if inj.rawRecv != 0 {
+		syscall.Close(inj.rawRecv)
 	}
 }
 
-// register inserts a fresh connState in the map. Called by the proxy before
-// the kernel issues the SYN, so the NFQUEUE handler always finds it in time.
-func (inj *Injector) register(cs *connState) {
-	key := connKey{srcIP: cs.srcIP, dstIP: cs.dstIP, srcPort: cs.srcPort, dstPort: cs.dstPort}
-	inj.conns.Store(key, cs)
+// Run records the SYN-ACK of each tracked upstream flow.
+func (inj *Injector) Run(done <-chan struct{}) {
+	buf := make([]byte, 65535)
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		n, _, err := syscall.Recvfrom(inj.rawRecv, buf, 0)
+		if err != nil {
+			continue
+		}
+		inj.parseSynAck(buf[:n])
+	}
 }
 
-func (inj *Injector) remove(cs *connState) {
-	key := connKey{srcIP: cs.srcIP, dstIP: cs.dstIP, srcPort: cs.srcPort, dstPort: cs.dstPort}
-	cs.mu.Lock()
-	cs.closed = true
-	cs.mu.Unlock()
-	inj.conns.Delete(key)
+func (inj *Injector) parseSynAck(pkt []byte) {
+	if len(pkt) < 20 {
+		return
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if len(pkt) < ihl+20 {
+		return
+	}
+	if pkt[12] != inj.dstIP[0] || pkt[13] != inj.dstIP[1] || pkt[14] != inj.dstIP[2] || pkt[15] != inj.dstIP[3] {
+		return
+	}
+	tcp := pkt[ihl:]
+	srcPort := binary.BigEndian.Uint16(tcp[0:2])
+	if srcPort != uint16(inj.cfg.ConnectPort) {
+		return
+	}
+	if tcp[13]&0x12 != 0x12 { // SYN+ACK
+		return
+	}
+	dstPort := binary.BigEndian.Uint16(tcp[2:4])
+	seq := binary.BigEndian.Uint32(tcp[4:8])
+	ack := binary.BigEndian.Uint32(tcp[8:12])
+	inj.syn.Store(dstPort, synInfo{ourSeqP1: ack, srvSeq: seq})
 }
 
-// Run registers the NFQUEUE callback and blocks until ctx is cancelled.
-func (inj *Injector) Run(ctx context.Context) error {
-	hook := func(a nfqueue.Attribute) int {
-		inj.handlePacket(a)
-		return 0
+// WaitSynAck blocks until the connection's SYN-ACK has been observed and returns
+// the derived sequence info.
+func (inj *Injector) WaitSynAck(srcPort uint16) (synInfo, error) {
+	deadline := time.Now().Add(time.Duration(inj.cfg.HandshakeTimeoutMs) * time.Millisecond)
+	for {
+		if v, ok := inj.syn.LoadAndDelete(srcPort); ok {
+			return v.(synInfo), nil
+		}
+		if time.Now().After(deadline) {
+			return synInfo{}, ErrBypassTimeout
+		}
+		time.Sleep(time.Millisecond)
 	}
-	errHook := func(e error) int {
-		log.Printf("nfqueue: %v", e)
-		return 0
+}
+
+const uMSS = 1388
+
+// InjectDecoy raw-sends the given decoy at the connection's first data byte,
+// segmented into MSS-sized pieces (each MD5-fooled) so it overlaps the real
+// ClientHello's segments at the same sequence numbers, then holds DecoyDelayMs.
+func (inj *Injector) InjectDecoy(srcPort uint16, info synInfo, decoy []byte) error {
+	seq := info.ourSeqP1
+	for off := 0; off < len(decoy); off += uMSS {
+		end := off + uMSS
+		if end > len(decoy) {
+			end = len(decoy)
+		}
+		if err := inj.injectAt(srcPort, seq, info.srvSeq+1, decoy[off:end]); err != nil {
+			return err
+		}
+		seq += uint32(end - off)
 	}
-	if err := inj.nfq.RegisterWithErrorFunc(ctx, hook, errHook); err != nil {
-		return err
+	if debug {
+		log.Printf("decoy injected: srcPort=%d seq=%d len=%d", srcPort, info.ourSeqP1, len(decoy))
 	}
-	<-ctx.Done()
+	time.Sleep(time.Duration(inj.cfg.DecoyDelayMs) * time.Millisecond)
 	return nil
 }
 
-func (inj *Injector) handlePacket(a nfqueue.Attribute) {
-	if a.PacketID == nil || a.Payload == nil {
-		return
+// inject re-sends the base decoy at the given sequence (single segment, for the
+// mid-stream refresh; bounded by MSS).
+func (inj *Injector) inject(srcPort uint16, seq, ack uint32) error {
+	d := inj.decoy
+	if len(d) > uMSS {
+		d = d[:uMSS]
 	}
-	id := *a.PacketID
-	payload := *a.Payload
-
-	pkt := gopacket.NewPacket(payload, layers.LayerTypeIPv4, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
-	ipL, _ := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-	tcpL, _ := pkt.Layer(layers.LayerTypeTCP).(*layers.TCP)
-	if ipL == nil || tcpL == nil {
-		_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-		return
-	}
-
-	var key connKey
-	copy(key.srcIP[:], ipL.SrcIP.To4())
-	copy(key.dstIP[:], ipL.DstIP.To4())
-	key.srcPort = uint16(tcpL.SrcPort)
-	key.dstPort = uint16(tcpL.DstPort)
-
-	if v, ok := inj.conns.Load(key); ok {
-		inj.handleOutbound(v.(*connState), tcpL, id)
-		return
-	}
-	rev := connKey{srcIP: key.dstIP, dstIP: key.srcIP, srcPort: key.dstPort, dstPort: key.srcPort}
-	if v, ok := inj.conns.Load(rev); ok {
-		inj.handleInbound(v.(*connState), tcpL, id)
-		return
-	}
-	_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
+	return inj.injectAt(srcPort, seq, ack, d)
 }
 
-func (inj *Injector) handleOutbound(cs *connState, tcp *layers.TCP, id uint32) {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	if cs.closed {
-		_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-		return
-	}
-
-	// SYN: record our initial sequence number.
-	if tcp.SYN && !tcp.ACK && !tcp.RST && !tcp.FIN && len(tcp.Payload) == 0 {
-		cs.synSeq = tcp.Seq
-		cs.haveSynSeq = true
-		_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-		return
-	}
-
-	// Empty ACK: could be the handshake-completing ACK we've been waiting for.
-	if tcp.ACK && !tcp.SYN && !tcp.RST && !tcp.FIN && len(tcp.Payload) == 0 {
-		if !cs.haveSynSeq || !cs.haveSynAckSeq || cs.fakeSent {
-			_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-			return
-		}
-		if tcp.Seq != cs.synSeq+1 || tcp.Ack != cs.synAckSeq+1 {
-			_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-			return
-		}
-		// Let the real ACK through first, then schedule the fake injection.
-		_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-		cs.fakeSent = true
-		go inj.sendFake(cs)
-		return
-	}
-
-	// Anything else (data segments, FIN, RST) is forwarded untouched.
-	_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-}
-
-func (inj *Injector) handleInbound(cs *connState, tcp *layers.TCP, id uint32) {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	if cs.closed {
-		_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-		return
-	}
-
-	// SYN-ACK: record the server's initial sequence number.
-	if tcp.SYN && tcp.ACK && !tcp.RST && !tcp.FIN && len(tcp.Payload) == 0 {
-		cs.synAckSeq = tcp.Seq
-		cs.haveSynAckSeq = true
-		_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-		return
-	}
-
-	// Empty ACK after we've injected: this is the server's dup-ACK for the
-	// out-of-window fake payload. It confirms the fake reached the server and
-	// is our signal to start relaying real data.
-	if tcp.ACK && !tcp.SYN && !tcp.RST && !tcp.FIN && len(tcp.Payload) == 0 && cs.fakeSent {
-		if tcp.Ack == cs.synSeq+1 {
-			_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-			// Release the waiting proxy goroutine.
-			go cs.finish(nil)
-			return
-		}
-	}
-
-	_ = inj.nfq.SetVerdict(id, nfqueue.NfAccept)
-}
-
-// sendFake waits a hair (matching the Python impl) and then crafts + emits
-// a TCP segment whose seq number is deliberately before the real next-seq,
-// so the server discards it while any on-path DPI happily ingests the fake SNI.
-func (inj *Injector) sendFake(cs *connState) {
-	time.Sleep(time.Millisecond)
-
-	cs.mu.Lock()
-	if cs.closed {
-		cs.mu.Unlock()
-		return
-	}
-	payload := cs.fakePayload
-	wrongSeq := cs.synSeq + 1 - uint32(len(payload))
-	ackNum := cs.synAckSeq + 1
-	srcIP := net.IP{cs.srcIP[0], cs.srcIP[1], cs.srcIP[2], cs.srcIP[3]}
-	dstIP := net.IP{cs.dstIP[0], cs.dstIP[1], cs.dstIP[2], cs.dstIP[3]}
-	srcPort := cs.srcPort
-	dstPort := cs.dstPort
-	cs.mu.Unlock()
-
-	frame, err := buildTCPSegment(srcIP, dstIP, srcPort, dstPort, wrongSeq, ackNum, payload)
+func (inj *Injector) injectAt(srcPort uint16, seq, ack uint32, payload []byte) error {
+	frame, err := buildSeg(inj.ifaceIP, inj.dstIP, srcPort, uint16(inj.cfg.ConnectPort),
+		seq, ack, fPSH|fACK, payload, true)
 	if err != nil {
-		cs.finish(err)
-		return
+		return err
 	}
-
 	var sa syscall.SockaddrInet4
-	sa.Port = int(dstPort)
-	copy(sa.Addr[:], dstIP.To4())
-
+	sa.Port = inj.cfg.ConnectPort
+	sa.Addr = inj.dstIP
 	inj.rawMu.Lock()
-	err = syscall.Sendto(inj.raw, frame, 0, &sa)
+	err = syscall.Sendto(inj.rawSend, frame, 0, &sa)
 	inj.rawMu.Unlock()
-	if err != nil {
-		cs.finish(err)
-	}
+	return err
 }
 
-func buildTCPSegment(srcIP, dstIP net.IP, srcPort, dstPort uint16, seq, ack uint32, payload []byte) ([]byte, error) {
+const (
+	fFIN = 0x01
+	fSYN = 0x02
+	fRST = 0x04
+	fPSH = 0x08
+	fACK = 0x10
+)
+
+// buildSeg serializes an IPv4+TCP segment, optionally with a TCP-MD5 option.
+func buildSeg(src, dst [4]byte, sport, dport uint16, seq, ack uint32, flags uint8, payload []byte, md5 bool) ([]byte, error) {
 	ip := &layers.IPv4{
 		Version:  4,
 		IHL:      5,
 		TTL:      64,
-		Id:       0,
 		Protocol: layers.IPProtocolTCP,
-		SrcIP:    srcIP.To4(),
-		DstIP:    dstIP.To4(),
+		SrcIP:    net.IP(src[:]),
+		DstIP:    net.IP(dst[:]),
 	}
 	tcp := &layers.TCP{
-		SrcPort:    layers.TCPPort(srcPort),
-		DstPort:    layers.TCPPort(dstPort),
-		Seq:        seq,
-		Ack:        ack,
-		DataOffset: 5,
-		PSH:        true,
-		ACK:        true,
-		Window:     65535,
+		SrcPort: layers.TCPPort(sport),
+		DstPort: layers.TCPPort(dport),
+		Seq:     seq,
+		Ack:     ack,
+		Window:  65535,
+		SYN:     flags&fSYN != 0,
+		ACK:     flags&fACK != 0,
+		PSH:     flags&fPSH != 0,
+		FIN:     flags&fFIN != 0,
+		RST:     flags&fRST != 0,
+	}
+	if md5 {
+		tcp.Options = []layers.TCPOption{{OptionType: 19, OptionLength: 18, OptionData: make([]byte, 16)}}
 	}
 	if err := tcp.SetNetworkLayerForChecksum(ip); err != nil {
 		return nil, err
@@ -301,6 +256,3 @@ func buildTCPSegment(srcIP, dstIP net.IP, srcPort, dstPort uint16, seq, ack uint
 	}
 	return buf.Bytes(), nil
 }
-
-// ErrBypassTimeout is returned when the fake-ack doesn't land in time.
-var ErrBypassTimeout = errors.New("bypass handshake timeout")
