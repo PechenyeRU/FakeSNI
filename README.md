@@ -108,6 +108,35 @@ Set FakeSNI's `CONNECT_IP` to the IP your client used to connect to before.
   sites it allows, swap in another allowed site.
 - Linux only.
 
+## If the default doesn't get through
+
+The default works from a lot of connections. On some networks it doesn't land
+right — your tunnel either won't connect (TLS / "decode" errors) or stays
+throttled. In that case try the alternative mode by adding two fields:
+
+```json
+"DECOY_MODE": "ttl",
+"DECOY_TTL": 8
+```
+
+`DECOY_TTL` is a small number you tune to your own connection. Start around 6–10
+and change it by one at a time:
+
+- connects but slow → raise it
+- TLS / "decode" errors → lower it
+- fast and no errors → that's your value
+
+## Limitations
+
+FakeSNI needs a reasonably direct path to the internet — a server, a desktop on
+a normal line, or a small Linux box used as a gateway.
+
+Some home and mobile ISPs (especially ones behind heavy carrier-grade NAT) mangle
+outgoing connections enough that neither mode can get through, no matter the
+`DECOY_TTL`. That's a property of the network, not something you can fix from the
+client: run FakeSNI from a cleaner uplink (a small Linux box or router *above*
+that NAT), or use an entry point that's already allowed without any of this.
+
 ## Credits
 
 Successor to [patterniha/SNI-Spoofing](https://github.com/patterniha/SNI-Spoofing).
